@@ -34,7 +34,7 @@
     "typescript": "^5.3.3",
     "vite": "^5.0.7",
     "vitest": "^1.0.4",
-    "wrangler": "^3.22.1"
+    "wrangler": "^3.114.15"
   },
   "dependencies": {
     "@google-cloud/bigquery": "^7.3.0"

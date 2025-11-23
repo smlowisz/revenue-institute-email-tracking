@@ -42,13 +42,6 @@ jobs:
           EVENT_SIGNING_SECRET: ${{ secrets.EVENT_SIGNING_SECRET }}
           ALLOWED_ORIGINS: ${{ secrets.ALLOWED_ORIGINS }}
 
-      - name: Deploy pixel to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=outbound-pixel
-
       - name: Deployment summary
         run: |
           echo "✅ Deployment successful!" >> $GITHUB_STEP_SUMMARY
