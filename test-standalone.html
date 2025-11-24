@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Tracking Test - Standalone</title>
+</head>
+<body>
+  <h1>Direct Pixel Test (No GTM)</h1>
+  <p>Open console to see tracking messages</p>
+  
+  <button onclick="alert('Clicked!')">Click Me</button>
+  <button onclick="window.scrollBy(0, 500)">Scroll Down</button>
+  
+  <div style="height: 2000px; background: linear-gradient(white, lightblue);"></div>
+  
+  <!-- Direct pixel load - no GTM -->
+  <script>
+    window.oieConfig = {
+      endpoint: 'https://intel.revenueinstitute.com/track',
+      debug: true  // FORCE debug mode
+    };
+  </script>
+  <script src="https://intel.revenueinstitute.com/pixel.js"></script>
+  
+  <script>
+    // Verify tracker loaded
+    setTimeout(() => {
+      if (window.oieTracker) {
+        console.log('✅ TRACKER EXISTS:', window.oieTracker);
+        console.log('✅ Visitor ID:', window.oieTracker.visitorId);
+        console.log('✅ Session ID:', window.oieTracker.sessionId);
+      } else {
+        console.error('❌ TRACKER NOT LOADED');
+      }
+    }, 2000);
+  </script>
+</body>
+</html>
+

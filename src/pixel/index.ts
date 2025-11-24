@@ -167,6 +167,17 @@ class OutboundIntentTracker {
       }
     });
 
+    // Email field tracking (for de-anonymization)
+    document.addEventListener('blur', (e) => {
+      const target = e.target as HTMLInputElement;
+      if (target.tagName === 'INPUT' && 
+          target.type === 'email' && 
+          target.value && 
+          target.value.includes('@')) {
+        this.captureEmailForIdentity(target.value);
+      }
+    }, true);
+
     // Visibility change (tab focus/blur)
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
@@ -188,22 +199,73 @@ class OutboundIntentTracker {
 
     // Rage clicks detection
     this.setupRageClickDetection();
+    
+    // Track iframes (same-origin only)
+    this.setupIframeTracking();
   }
 
   private trackPageview(): void {
+    const urlParams = new URLSearchParams(window.location.search);
+    
+    // Extract all UTM parameters
+    const utmParams: Record<string, string> = {};
+    ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 
+     'gclid', 'fbclid', 'msclkid', 'ref', 'source'].forEach(param => {
+      const value = urlParams.get(param);
+      if (value) utmParams[param] = value;
+    });
+
+    // Get all cookies (for fingerprinting)
+    const cookies = document.cookie.split(';').reduce((acc, cookie) => {
+      const [key, value] = cookie.trim().split('=');
+      if (key && !key.startsWith('_oie')) { // Exclude our own cookies
+        acc[key] = value;
+      }
+      return acc;
+    }, {} as Record<string, string>);
+
     this.trackEvent('pageview', {
+      // Page info
       title: document.title,
       path: window.location.pathname,
       search: window.location.search,
       hash: window.location.hash,
+      fullUrl: window.location.href,
+      
+      // Referrer
       referrer: document.referrer,
+      referrerDomain: document.referrer ? new URL(document.referrer).hostname : null,
+      
+      // UTM & Campaign tracking
+      ...utmParams,
+      hasUtm: Object.keys(utmParams).length > 0,
+      
+      // Device & Browser
       screenWidth: window.screen.width,
       screenHeight: window.screen.height,
       viewportWidth: window.innerWidth,
       viewportHeight: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio,
+      colorDepth: window.screen.colorDepth,
+      
+      // Browser info
       userAgent: navigator.userAgent,
       language: navigator.language,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+      languages: navigator.languages,
+      platform: navigator.platform,
+      cookieEnabled: navigator.cookieEnabled,
+      doNotTrack: navigator.doNotTrack,
+      
+      // Location & Time
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      timezoneOffset: new Date().getTimezoneOffset(),
+      
+      // Page performance (if available)
+      loadTime: performance.timing ? (performance.timing.loadEventEnd - performance.timing.navigationStart) : null,
+      
+      // Cookies (for fingerprinting)
+      cookieCount: Object.keys(cookies).length,
+      hasCookies: Object.keys(cookies).length > 0
     });
   }
 
@@ -246,31 +308,44 @@ class OutboundIntentTracker {
     }
   }
 
-  private trackFormSubmit(e: Event): void {
+  private async trackFormSubmit(e: Event): Promise<void> {
     const form = e.target as HTMLFormElement;
     const formData = new FormData(form);
     const data: Record<string, any> = {};
+    let emailFound = '';
 
     // Capture form fields (hash emails)
-    formData.forEach((value, key) => {
-      if (key.toLowerCase().includes('email') && typeof value === 'string') {
-        // Hash email for privacy
-        this.hashEmail(value).then(hashes => {
-          data[`${key}_sha256`] = hashes.sha256;
-          data[`${key}_sha1`] = hashes.sha1;
-          data[`${key}_md5`] = hashes.md5;
-        });
+    for (const [key, value] of formData.entries()) {
+      if (key.toLowerCase().includes('email') && typeof value === 'string' && value.includes('@')) {
+        emailFound = value;
+        // Hash email for privacy and de-anonymization
+        const hashes = await this.hashEmail(value);
+        data[`${key}_sha256`] = hashes.sha256;
+        data[`${key}_sha1`] = hashes.sha1;
+        data[`${key}_md5`] = hashes.md5;
+        
+        // Store for de-anonymization
+        this.storeEmailHash(hashes.sha256, value);
       } else {
         data[key] = typeof value === 'string' ? value.substring(0, 100) : value;
       }
-    });
+    }
 
     this.trackEvent('form_submit', {
       formId: form.id || 'unknown',
       formAction: form.action,
       formMethod: form.method,
-      fields: Object.keys(data)
+      fields: Object.keys(data),
+      hasEmail: !!emailFound
     });
+
+    // If email was captured, potentially identify this visitor
+    if (emailFound) {
+      this.trackEvent('email_captured', {
+        formId: form.id || 'unknown',
+        previouslyAnonymous: this.visitorId === null
+      });
+    }
   }
 
   private async hashEmail(email: string): Promise<{ sha256: string; sha1: string; md5: string }> {
@@ -376,14 +451,15 @@ class OutboundIntentTracker {
     this.eventQueue.push(event);
     this.lastActivityTime = Date.now();
 
-    this.log('Event tracked', event);
+    console.log('[OutboundIntentTracker] Event tracked:', type);
 
-    // Batch send events (every 5 events or 10 seconds)
-    if (this.eventQueue.length >= 5) {
-      this.flush();
-    } else {
-      setTimeout(() => this.flush(), 10000);
-    }
+    // Send ALL events immediately - no batching, no delays
+    // Use setTimeout(0) to ensure it happens after event is queued
+    setTimeout(() => {
+      if (this.eventQueue.length > 0) {
+        this.flush();
+      }
+    }, 100); // 100ms delay to allow rapid events to batch slightly
   }
 
   private flush(useBeacon: boolean = false): void {
@@ -399,9 +475,12 @@ class OutboundIntentTracker {
       }
     });
 
+    // Always log event sending (regardless of debug mode) for troubleshooting
+    console.log('[OutboundIntentTracker] Sending events:', events.map(e => e.type).join(', '));
+
     if (useBeacon && navigator.sendBeacon) {
-      navigator.sendBeacon(this.config.endpoint, payload);
-      this.log('Events sent via beacon', events.length);
+      const sent = navigator.sendBeacon(this.config.endpoint, payload);
+      console.log('[OutboundIntentTracker] Beacon sent:', sent, events.length, 'events');
     } else {
       fetch(this.config.endpoint, {
         method: 'POST',
@@ -410,12 +489,16 @@ class OutboundIntentTracker {
         },
         body: payload,
         keepalive: true
+      }).then(res => {
+        console.log('[OutboundIntentTracker] Fetch response:', res.status, events.length, 'events');
+        return res.json();
+      }).then(data => {
+        console.log('[OutboundIntentTracker] Server response:', data);
       }).catch(err => {
-        this.log('Failed to send events', err);
+        console.error('[OutboundIntentTracker] Failed to send events:', err);
         // Re-queue on failure
         this.eventQueue.push(...events);
       });
-      this.log('Events sent via fetch', events.length);
     }
   }
 
@@ -434,6 +517,65 @@ class OutboundIntentTracker {
   private log(...args: any[]): void {
     if (this.config.debug) {
       console.log('[OutboundIntentTracker]', ...args);
+    }
+  }
+
+  // Email capture for de-anonymization
+  private async captureEmailForIdentity(email: string): Promise<void> {
+    if (!email || !email.includes('@')) return;
+    
+    const hashes = await this.hashEmail(email);
+    this.storeEmailHash(hashes.sha256, email);
+    
+    // Track that we captured an email (for de-anonymization)
+    this.trackEvent('email_identified', {
+      emailHash: hashes.sha256,
+      wasAnonymous: this.visitorId === null,
+      sessionId: this.sessionId
+    });
+  }
+
+  private storeEmailHash(hash: string, email: string): void {
+    try {
+      // Store email hash for later de-anonymization
+      localStorage.setItem('_oie_email_hash', hash);
+      localStorage.setItem('_oie_email', email); // Store for reference (optional)
+    } catch (e) {
+      console.log('Failed to store email hash', e);
+    }
+  }
+
+  // Track forms inside iframes (same-origin only)
+  private setupIframeTracking(): void {
+    try {
+      // Check for iframes
+      const iframes = document.querySelectorAll('iframe');
+      
+      iframes.forEach(iframe => {
+        try {
+          // Only works for same-origin iframes
+          const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+          
+          if (iframeDoc) {
+            // Track form submits in iframe
+            iframeDoc.addEventListener('submit', (e) => {
+              this.trackFormSubmit(e);
+            });
+            
+            // Track clicks in iframe
+            iframeDoc.addEventListener('click', (e) => {
+              this.trackClick(e);
+            });
+            
+            console.log('[OutboundIntentTracker] Tracking iframe:', iframe.src);
+          }
+        } catch (e) {
+          // Cross-origin iframe - can't access
+          console.log('[OutboundIntentTracker] Cannot track cross-origin iframe');
+        }
+      });
+    } catch (e) {
+      console.log('[OutboundIntentTracker] Iframe tracking not available');
     }
   }
 

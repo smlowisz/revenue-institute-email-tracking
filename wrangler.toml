@@ -15,11 +15,6 @@ binding = "PERSONALIZATION"
 id = "ff943d471f2f439c9199c9ea78e1426c"
 preview_id = "b653bcb3e6f04feda227b6220b40ac49"
 
-# Static assets (serve pixel.js)
-[assets]
-directory = "./dist"
-binding = "ASSETS"
-
 # Environment variables
 [env.production]
 vars = { ENVIRONMENT = "production" }

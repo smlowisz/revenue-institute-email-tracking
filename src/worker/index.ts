@@ -3,10 +3,11 @@
  * Edge worker for event ingestion, validation, and forwarding to BigQuery
  */
 
+import { PIXEL_CODE_BASE64 } from './pixel-bundle';
+
 export interface Env {
   IDENTITY_STORE: KVNamespace;
   PERSONALIZATION: KVNamespace;
-  ASSETS: Fetcher;
   BIGQUERY_PROJECT_ID: string;
   BIGQUERY_DATASET: string;
   BIGQUERY_CREDENTIALS: string;
@@ -65,21 +66,16 @@ export default {
     }
 
     if (url.pathname === '/pixel.js') {
-      // Serve the tracking pixel from static assets
-      const assetResponse = await env.ASSETS.fetch(new Request('https://fake-host/pixel.iife.js'));
-      
-      if (assetResponse.ok) {
-        return new Response(assetResponse.body, {
-          headers: { 
-            'Content-Type': 'application/javascript',
-            'Cache-Control': 'public, max-age=86400', // Cache for 24 hours
-            'Access-Control-Allow-Origin': '*', // Allow cross-origin
-            'X-Content-Type-Options': 'nosniff'
-          }
-        });
-      }
-      
-      return new Response('Pixel not found', { status: 404 });
+      // Serve the tracking pixel directly (decode from base64)
+      const pixelCode = atob(PIXEL_CODE_BASE64);
+      return new Response(pixelCode, {
+        headers: { 
+          'Content-Type': 'application/javascript',
+          'Cache-Control': 'public, max-age=86400', // Cache for 24 hours
+          'Access-Control-Allow-Origin': '*', // Allow cross-origin
+          'X-Content-Type-Options': 'nosniff'
+        }
+      });
     }
 
     return new Response('Not Found', { status: 404 });
@@ -106,10 +102,16 @@ async function handleTrackEvents(request: Request, env: Env, ctx: ExecutionConte
     // Enrich events with server-side data
     const enrichedEvents = body.events.map(event => enrichEvent(event, request));
 
-    // Store events asynchronously (don't wait)
-    ctx.waitUntil(storeEvents(enrichedEvents, env));
+    // Store events SYNCHRONOUSLY to see errors
+    try {
+      await storeEvents(enrichedEvents, env);
+      console.log('✅ Events stored successfully');
+    } catch (error: any) {
+      console.error('❌ ERROR storing events:', error.message);
+      // Still return success to client, but log the error
+    }
 
-    // Return success immediately
+    // Return success
     return new Response(JSON.stringify({ 
       success: true, 
       eventsReceived: body.events.length 
@@ -130,47 +132,118 @@ async function handleTrackEvents(request: Request, env: Env, ctx: ExecutionConte
  * Enrich event with server-side data
  */
 function enrichEvent(event: TrackingEvent, request: Request): any {
+  // Server-side enrichment with ALL available data
   const ip = request.headers.get('CF-Connecting-IP');
   const country = request.headers.get('CF-IPCountry');
   const userAgent = request.headers.get('User-Agent');
+  const acceptLanguage = request.headers.get('Accept-Language');
+  const referer = request.headers.get('Referer');
+  
+  // Parse URL for additional context
+  const url = new URL(event.url);
+  const urlParams = Object.fromEntries(url.searchParams.entries());
 
   return {
     ...event,
+    
+    // Server timestamps
     serverTimestamp: Date.now(),
+    
+    // IP & Geo
     ip,
+    ipHash: ip ? hashString(ip) : null, // Hashed IP for privacy
     country,
-    userAgent,
-    // Cloudflare specific data
-    colo: request.cf?.colo,
-    asn: request.cf?.asn,
     city: request.cf?.city,
     region: request.cf?.region,
-    timezone: request.cf?.timezone
+    continent: request.cf?.continent,
+    postalCode: request.cf?.postalCode,
+    metroCode: request.cf?.metroCode,
+    latitude: request.cf?.latitude,
+    longitude: request.cf?.longitude,
+    timezone: request.cf?.timezone,
+    
+    // Network info
+    colo: request.cf?.colo, // Cloudflare datacenter
+    asn: request.cf?.asn, // Autonomous System Number
+    asOrganization: request.cf?.asOrganization, // ISP/Company
+    
+    // Request headers
+    userAgent,
+    acceptLanguage,
+    refererHeader: referer,
+    
+    // URL breakdown
+    urlParams, // All query parameters
+    utmSource: urlParams.utm_source || null,
+    utmMedium: urlParams.utm_medium || null,
+    utmCampaign: urlParams.utm_campaign || null,
+    utmTerm: urlParams.utm_term || null,
+    utmContent: urlParams.utm_content || null,
+    gclid: urlParams.gclid || null,
+    fbclid: urlParams.fbclid || null,
+    
+    // Device hints (from Cloudflare)
+    deviceType: request.cf?.deviceType, // desktop, mobile, tablet
+    isEUCountry: request.cf?.isEUCountry,
+    
+    // TLS/Security
+    tlsVersion: request.cf?.tlsVersion,
+    tlsCipher: request.cf?.tlsCipher,
+    httpProtocol: request.cf?.httpProtocol
   };
+}
+
+// Helper function to hash strings for privacy
+function hashString(str: string): string {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return hash.toString(36);
 }
 
 /**
  * Store events in BigQuery
  */
 async function storeEvents(events: any[], env: Env): Promise<void> {
+  console.log('🔄 storeEvents called with', events.length, 'events');
+  console.log('Event types:', events.map(e => e.type).join(', '));
+  
   try {
     // Get BigQuery credentials
+    console.log('📋 Parsing credentials...');
     const credentials = JSON.parse(env.BIGQUERY_CREDENTIALS);
     const projectId = env.BIGQUERY_PROJECT_ID;
     const dataset = env.BIGQUERY_DATASET;
+    console.log('✅ Credentials parsed. Project:', projectId, 'Dataset:', dataset);
 
     // Create JWT token for BigQuery API authentication
+    console.log('🔑 Creating BigQuery token...');
     const token = await createBigQueryToken(credentials);
+    console.log('✅ Token created');
 
     // Insert rows into BigQuery
     const tableId = 'events';
     const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${dataset}/tables/${tableId}/insertAll`;
+    console.log('📊 BigQuery URL:', url);
 
-    const rows = events.map((event, index) => ({
-      insertId: `${event.sessionId}-${event.timestamp}-${index}`,
-      json: event
-    }));
+    const rows = events.map((event, index) => {
+      // Convert data field to JSON string if it exists
+      const eventForBQ = {
+        ...event,
+        data: event.data ? JSON.stringify(event.data) : null
+      };
+      
+      return {
+        insertId: `${event.sessionId}-${event.timestamp}-${index}`,
+        json: eventForBQ
+      };
+    });
+    console.log('📦 Prepared', rows.length, 'rows for insertion');
 
+    console.log('🚀 Sending to BigQuery...');
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -183,22 +256,35 @@ async function storeEvents(events: any[], env: Env): Promise<void> {
         ignoreUnknownValues: false
       })
     });
+    
+    console.log('📬 BigQuery response status:', response.status, response.statusText);
 
     if (!response.ok) {
       const error = await response.text();
-      console.error('BigQuery insertion failed:', error);
-      throw new Error(`BigQuery error: ${response.status}`);
+      console.error('❌ BigQuery insertion failed:', {
+        status: response.status,
+        statusText: response.statusText,
+        error,
+        projectId,
+        dataset,
+        tableId
+      });
+      throw new Error(`BigQuery error: ${response.status} - ${error}`);
     }
 
     const result = await response.json();
     
     if (result.insertErrors) {
-      console.error('BigQuery insert errors:', result.insertErrors);
+      console.error('❌ BigQuery insert errors:', JSON.stringify(result.insertErrors, null, 2));
+    } else {
+      console.log(`✅ Successfully stored ${events.length} events in BigQuery`);
     }
-
-    console.log(`Successfully stored ${events.length} events in BigQuery`);
-  } catch (error) {
-    console.error('Failed to store events:', error);
+  } catch (error: any) {
+    console.error('❌ Failed to store events:', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
     // In production, you might want to queue failed events for retry
   }
 }
