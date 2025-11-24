@@ -1,286 +1,195 @@
-⭐ REVISED PRODUCT SPEC — Outbound Intent Engine
-Version: v1.0
-🔥 1. Overview
+# 🎯 Outbound Intent Engine
 
-The Outbound Intent Engine identifies visitors arriving from cold outreach using a single short URL parameter (e.g., ?i=ab3f9).
+**Track visitor behavior from cold outreach → Build custom intent scores**
 
-Once identified, a lightweight JavaScript pixel captures all on-site behavior—pageviews, engagement, scroll depth, and form activity—and streams it to an edge backend (Cloudflare Worker), which forwards events into BigQuery.
+[![Status](https://img.shields.io/badge/status-live-success)](https://intel.revenueinstitute.com/health)
+[![Leads](https://img.shields.io/badge/leads-1M%2B_tracked-blue)](#)
+[![Personalization](https://img.shields.io/badge/personalization-%3C10ms-brightgreen)](#)
 
-This creates a behavioral profile of each outbound lead and enables intent scoring, campaign-level attribution, and future AI-powered analysis.
+---
 
-🎯 2. Primary Goals
+## ⚡ System Status
 
-Instantly identify visitors from outbound email with zero friction.
+**🟢 LIVE and operational**
 
-Track the full buyer journey across sessions and devices.
+- **Worker:** https://intel.revenueinstitute.com
+- **Tracking:** Active via GTM
+- **Leads ready:** 1,093,184 with tracking IDs
+- **Personalization:** 9,904 leads in KV (<10ms)
+- **Auto-sync:** Hourly updates configured
 
-Store all behavior in BigQuery for scoring, modeling, and historical analysis.
+---
 
-Never degrade site performance, Core Web Vitals, or SEO.
+## 🚀 Quick Start
 
-Enable future customer-facing personalization using identity data.
+### **1. Send Email Campaigns**
 
-Optional: Provide a foundation for AI-based predictive scoring and buyer journey forecasting.
+Use tracking parameter in ANY URL:
+```
+https://revenueinstitute.com/demo?i={{trackingId}}
+https://revenueinstitute.com/pricing?i={{trackingId}}
+https://revenueinstitute.com/any-page?i={{trackingId}}
+```
 
-🧩 3. Key Use Cases
-USE CASE A — Cold Email Click → Real-Time Identification
+**Parameter:** `i` (identity)  
+**Your leads table has:** `trackingId` column with unique IDs
 
-Recipient clicks:
+### **2. View Tracking Data**
 
-https://yourdomain.com/go?i=7f29d
+**BigQuery Console:** https://console.cloud.google.com/bigquery?project=n8n-revenueinstitute
 
+```sql
+-- See all recent activity
+SELECT type, visitorId, url, city, asOrganization
+FROM `n8n-revenueinstitute.outbound_sales.events`
+WHERE _insertedAt >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+ORDER BY timestamp DESC;
 
-System:
+-- See multi-visitor companies
+SELECT * FROM `n8n-revenueinstitute.outbound_sales.company_activity`
+WHERE hasMultipleVisitors = TRUE;
 
-Resolves i=7f29d to a known lead.
+-- See return visit patterns
+SELECT * FROM `n8n-revenueinstitute.outbound_sales.visitor_return_patterns`
+ORDER BY totalVisitDays DESC;
+```
 
-Initializes a new browser session.
+### **3. Use Personalization**
 
-Begins tracking user activity immediately.
+**24 fields available:**
+- firstName, lastName, email, phone
+- company, companySize, revenue, industry
+- jobTitle, seniority, department
+- And more... see [PERSONALIZATION_FIELDS.md](PERSONALIZATION_FIELDS.md)
 
-Stores all events in BigQuery.
+**Example HTML:**
+```html
+<h1>Welcome, <span data-personalize="firstName">there</span>!</h1>
+<p>Solutions for <span data-personalize="companyName">your company</span></p>
+<p>Perfect for <span data-personalize="industry">your industry</span></p>
+```
 
-Outcome: Full outbound attribution, identity resolution, and session tracking.
+---
 
-USE CASE B — High-Intent Behavior Detection
+## 📊 What's Being Tracked
 
-Visitor exhibits high-intent patterns:
+### **Events Captured:**
+- Pageviews, Clicks, Scrolls, Forms, Videos
+- Focus changes, Page exits, Copy/paste
+- Device switching, Return visits
 
-Pricing page visits
+### **Data Per Event (100+ fields):**
+- Full URL + all UTM parameters
+- Referrer + auto-detected channel
+- Button/link ID, class, text
+- IP, city, region, ISP, timezone
+- Device fingerprint, browser ID
+- Visit count, reading time, scroll depth
+- Company identifier (multi-visitor detection)
+- Email hashes (SHA-256, SHA-1, MD5)
 
-Deep scroll depth
+**Complete reference:** [DATA_DICTIONARY.md](DATA_DICTIONARY.md)
 
-Case studies viewed
+---
 
-Product/feature exploration
+## 🗄️ Database Structure
 
-Return visits
+**Tables (6):**
+1. `events` - Raw event stream
+2. `sessions` - Aggregated sessions
+3. `lead_profiles` - Visitor profiles
+4. `identity_map` - Tracking ID lookups
+5. `email_clicks` - Click tracking
+6. `leads` - Your 1M+ leads
 
-Video engagement
+**Views (9):**
+1. `company_activity` - Multi-visitor companies
+2. `visitor_return_patterns` - Return analysis
+3. `content_depth` - Engagement quality
+4. `multi_device_visitors` - Device switching
+5. `backtracking_visitors` - Navigation patterns
+6. Plus 4 more analytical views
 
-Form interactions
+---
 
-System captures:
+## 🔄 Automated KV Sync
 
-IP → company inference
+**Schedule:** Every hour (via GitHub Actions)
 
-Browser/device
+**Updates:**
+- ✅ New leads added to database
+- ✅ Behavioral scores (return visits, pages viewed)
+- ✅ Device fingerprints (multi-device tracking)
+- ✅ Engagement levels (cold/warm/hot)
 
-Location
+**No manual work needed!** See: [docs/technical/AUTOMATED_KV_SYNC.md](docs/technical/AUTOMATED_KV_SYNC.md)
 
-HEMs (sha256, sha1, MD5) if captured via forms
+---
 
-Engagement level
+## 📚 Documentation
 
-Outcome: Behavioral fingerprints stored in BigQuery to support scoring, reporting, and AI models.
+### **Root Files (Essential):**
+- **README.md** - This file (overview)
+- **[PERSONALIZATION_FIELDS.md](PERSONALIZATION_FIELDS.md)** - All 24 personalization fields
+- **[DATA_DICTIONARY.md](DATA_DICTIONARY.md)** - Complete data reference
 
-USE CASE C — Multi-Session Tracking
+### **Organized Docs:**
+- **[docs/guides/](docs/guides/)** - Beginner setup guides (Cloudflare, BigQuery, GitHub)
+- **[docs/technical/](docs/technical/)** - Technical docs (Architecture, Deployment, Dev guide)
+- **[docs/qa/](docs/qa/)** - QA reports & system status
 
-Visitor returns via:
+---
 
-Direct/organic
+## 🎯 Tech Stack
 
-Bookmarks
+| Layer | Technology | Purpose |
+|-------|------------|---------|
+| Client | JavaScript (15 KB) | Event capture |
+| Edge | Cloudflare Workers | Event routing |
+| Cache | Cloudflare KV | Personalization (<10ms) |
+| Warehouse | BigQuery | Analytics & scoring |
+| Integration | Google Tag Manager | Easy deployment |
 
-Shared link
+---
 
-Forwarded email
+## 💰 Cost
 
-Pixel re-identifies via cookie/localStorage.
+**Current scale (1M leads, moderate traffic):**
+- Cloudflare Workers: $0-5/month
+- Cloudflare KV: $0 (free tier)
+- BigQuery: $0-10/month
+- GitHub Actions: $0 (free tier)
 
-Outcome: Cross-session continuity with accurate identity stitching.
+**Total: ~$0-15/month** 💰
 
-👥 4. Personas
-Primary: SDR/BDR
+---
 
-Identify who clicked from outbound
+## 🚀 Next Steps
 
-Know which leads are “warming up”
+1. ✅ **System is ready** - Everything deployed
+2. ⏳ **Hard reload site** - Get latest pixel (Cmd+Shift+R)
+3. ✅ **Start campaigns** - Use `?i={{trackingId}}` in emails
+4. ✅ **Query data** - Build your custom scoring
+5. ✅ **Personalize** - Use data attributes on pages
 
-Follow up at the moment of intent
+---
 
-Prioritize leads automatically
+## 🆘 Quick Links
 
-Secondary: RevOps / Marketing Ops
+- **Worker Health:** https://intel.revenueinstitute.com/health
+- **BigQuery Console:** https://console.cloud.google.com/bigquery?project=n8n-revenueinstitute
+- **Cloudflare Dashboard:** https://dash.cloudflare.com
+- **GitHub Actions:** https://github.com/smlowisz/revenue-institute-email-tracking/actions
 
-Configure scoring
+---
 
-Validate attribution
+## 📞 Support
 
-Sync high-intent leads to CRM
+See detailed guides in `docs/` folder:
+- Setup issues → `docs/guides/`
+- Technical questions → `docs/technical/`
+- System status → `docs/qa/`
 
-Build dashboards
+---
 
-Tertiary: Sales Leaders
-
-Understand intent trends
-
-Optimize outbound strategy
-
-Review campaign effectiveness
-
-Improve pipeline forecasting
-
-🏗 5. Functional Requirements
-FR1 — Identity Tracking
-
-Identify user via a single URL param (i).
-
-Persist identity via:
-
-localStorage
-
-first-party cookie
-
-Persistence should survive at least 90 days.
-
-FR2 — Event Tracking
-
-Pixel tracks:
-
-Required Events
-
-Pageview (URL, timestamp, referrer)
-
-Scroll depth
-
-Active time on page
-
-Click interactions (CTA, nav, buttons)
-
-Form start
-
-Form submission
-
-Video engagement
-
-Focus loss / regain
-
-Return visits
-
-Optional Events
-
-Text highlight
-
-Rage clicks
-
-Copy events
-
-Cursor jitter
-
-Reading velocity
-
-FR3 — Session Management
-
-A session:
-
-Begins at first interaction.
-
-Ends after 30 minutes inactivity.
-
-Includes:
-
-Entry / exit pages
-
-Duration
-
-Device & browser metadata
-
-All events captured
-
-FR4 — Data Storage
-
-All events stored in:
-
-events (raw events)
-
-sessions (session aggregates)
-
-lead_profiles (identity, scoring, campaign metadata)
-
-FR5 — Personalization Read Model (New Requirement)
-
-Identity + enrichment data synced from BigQuery into Cloudflare KV.
-
-Pixel can fetch personalization profile in <10ms via a Worker.
-
-Supports personalized on-page content (name, company, industry, etc.) for customers.
-
-💨 6. Non-Functional Requirements
-NFR1 — Performance
-
-Pixel <12 KB
-
-Zero blocking JavaScript
-
-Events sent via navigator.sendBeacon or async fetch
-
-Page load impact <5ms
-
-NFR2 — Reliability
-
-99.99% uptime via Cloudflare edge
-
-<1s BigQuery insertion delay
-
-Retry logic for failed event submissions
-
-NFR3 — Scalability
-
-1,000,000+ events/day
-
-10,000,000+ outbound leads
-
-10,000+ simultaneous visitor sessions
-
-NFR4 — Security
-
-Only allow POSTs from your domain
-
-Validate identity tokens
-
-Event signing using a server-side secret
-
-No personally identifiable info exposed client-side
-
-🗺 7. End-to-End Visitor Journey
-
-Outbound email sent with link:
-
-https://yourdomain.com/go?i=94dj2
-
-
-Visitor clicks link
-Pixel extracts i and persists identity.
-
-Pixel activates
-Captures behavioral events locally.
-
-Events stream to Cloudflare Worker
-Worker batches + sends to BigQuery.
-
-BigQuery stores + stitches events
-Session + identity + campaign metadata combined.
-
-KV updated based on nightly sync
-
-Pixel personalizes website instantly for logged-in customers
-
-CRM sync + alerts as scoring increases.
-
-📦 8. Dependencies
-Required
-
-Cloudflare Workers (event pipeline)
-
-BigQuery (warehouse + scoring)
-
-Required for personalization
-
-Cloudflare KV (identity + personalization cache)
-
-Optional
-
-n8n (Smartlead webhooks → BigQuery + KV sync)
-
-Cloudflare D1 (alternative to KV for personalization)
+**Built for Revenue Institute** | Last updated: November 24, 2025
