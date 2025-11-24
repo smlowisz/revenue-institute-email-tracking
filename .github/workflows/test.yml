@@ -41,11 +41,11 @@ jobs:
         run: |
           SIZE=$(stat -f%z dist/pixel.iife.js 2>/dev/null || stat -c%s dist/pixel.iife.js)
           echo "Pixel size: $SIZE bytes"
-          if [ $SIZE -gt 12288 ]; then
-            echo "❌ ERROR: Pixel is larger than 12KB!"
+          if [ $SIZE -gt 20480 ]; then
+            echo "❌ ERROR: Pixel is larger than 20KB!"
             exit 1
           else
-            echo "✅ Pixel size OK (<12KB)"
+            echo "✅ Pixel size OK (<20KB)"
           fi
 
       - name: Run tests

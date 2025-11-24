@@ -19,7 +19,15 @@ export default defineConfig({
     terserOptions: {
       compress: {
         drop_console: false,  // Keep console.log for debugging
-        drop_debugger: true
+        drop_debugger: true,
+        passes: 2,
+        pure_funcs: ['console.log'],
+        unsafe: true,
+        unsafe_comps: true,
+        unsafe_math: true
+      },
+      mangle: {
+        toplevel: true
       }
     },
     target: 'es2015',
