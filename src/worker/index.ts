@@ -142,6 +142,10 @@ function enrichEvent(event: TrackingEvent, request: Request): any {
   // Parse URL for additional context
   const url = new URL(event.url);
   const urlParams = Object.fromEntries(url.searchParams.entries());
+  
+  // Company identifier (IP-based, without reverse lookup)
+  // Use last 2 octets of IP as company identifier (same subnet = likely same company)
+  const companyIdentifier = ip ? hashString(ip.split('.').slice(0, 2).join('.')) : null;
 
   return {
     ...event,
@@ -152,6 +156,7 @@ function enrichEvent(event: TrackingEvent, request: Request): any {
     // IP & Geo
     ip,
     ipHash: ip ? hashString(ip) : null, // Hashed IP for privacy
+    companyIdentifier, // Same subnet = likely same company
     country,
     city: request.cf?.city,
     region: request.cf?.region,
@@ -165,7 +170,7 @@ function enrichEvent(event: TrackingEvent, request: Request): any {
     // Network info
     colo: request.cf?.colo, // Cloudflare datacenter
     asn: request.cf?.asn, // Autonomous System Number
-    asOrganization: request.cf?.asOrganization, // ISP/Company
+    asOrganization: request.cf?.asOrganization, // ISP/Company name
     
     // Request headers
     userAgent,

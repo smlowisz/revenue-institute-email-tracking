@@ -62,16 +62,22 @@ class OutboundIntentTracker {
     // 2. Load existing visitor ID
     this.loadVisitorId();
 
-    // 3. Set up event listeners
+    // 3. Update page history for backtracking detection
+    this.updatePageHistory();
+
+    // 4. Set up event listeners
     this.attachEventListeners();
 
-    // 4. Track initial pageview
+    // 5. Track initial pageview
     this.trackPageview();
 
-    // 5. Start active time tracking
+    // 6. Start active time tracking
     this.startActiveTimeTracking();
 
-    // 6. Set up beacon on page unload
+    // 7. Start reading time tracking
+    this.startReadingTimeTracking();
+
+    // 8. Set up beacon on page unload
     this.setupUnloadBeacon();
 
     this.log('Tracker initialized', { visitorId: this.visitorId, sessionId: this.sessionId });
@@ -86,8 +92,44 @@ class OutboundIntentTracker {
       this.saveVisitorId(identityValue);
       this.log('Identity captured from URL', identityValue);
       
+      // Track device switching (#19)
+      this.trackDeviceSwitching(identityValue);
+      
       // Clean URL (optional - remove the tracking param)
       // this.cleanUrl();
+    }
+  }
+
+  // Device switching detection
+  private trackDeviceSwitching(visitorId: string): void {
+    try {
+      const deviceHistory = JSON.parse(localStorage.getItem('_oie_devices') || '[]');
+      const currentDevice = {
+        fingerprint: this.generateDeviceFingerprint(),
+        browserId: this.getBrowserId(),
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        timestamp: Date.now()
+      };
+      
+      // Check if this is a new device for this visitor
+      const isNewDevice = !deviceHistory.some((d: any) => d.fingerprint === currentDevice.fingerprint);
+      
+      if (isNewDevice) {
+        deviceHistory.push(currentDevice);
+        localStorage.setItem('_oie_devices', JSON.stringify(deviceHistory));
+        
+        // Track device switch event
+        if (deviceHistory.length > 1) {
+          this.trackEvent('device_switched', {
+            previousDeviceCount: deviceHistory.length - 1,
+            newDevice: currentDevice.fingerprint,
+            allDevices: deviceHistory.map((d: any) => d.fingerprint)
+          });
+        }
+      }
+    } catch (e) {
+      // Ignore
     }
   }
 
@@ -192,9 +234,24 @@ class OutboundIntentTracker {
     // Video tracking (for <video> elements)
     this.setupVideoTracking();
 
-    // Copy events
-    document.addEventListener('copy', () => {
-      this.trackEvent('text_copied');
+    // Copy/paste events (detailed tracking)
+    document.addEventListener('copy', (e) => {
+      const selection = window.getSelection()?.toString() || '';
+      this.trackEvent('text_copied', {
+        textLength: selection.length,
+        textPreview: selection.substring(0, 100), // First 100 chars
+        page: window.location.pathname
+      });
+    });
+
+    document.addEventListener('paste', (e) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
+        this.trackEvent('text_pasted', {
+          fieldName: (target as HTMLInputElement).name || (target as HTMLInputElement).id,
+          page: window.location.pathname
+        });
+      }
     });
 
     // Rage clicks detection
@@ -215,14 +272,17 @@ class OutboundIntentTracker {
       if (value) utmParams[param] = value;
     });
 
-    // Get all cookies (for fingerprinting)
-    const cookies = document.cookie.split(';').reduce((acc, cookie) => {
-      const [key, value] = cookie.trim().split('=');
-      if (key && !key.startsWith('_oie')) { // Exclude our own cookies
-        acc[key] = value;
-      }
-      return acc;
-    }, {} as Record<string, string>);
+    // Determine default channel source (if no UTM)
+    const defaultChannel = this.getDefaultChannelSource();
+
+    // Generate device fingerprint for cross-device tracking
+    const deviceFingerprint = this.generateDeviceFingerprint();
+
+    // Get visit count from localStorage
+    const visitCount = this.getVisitCount();
+    
+    // Track reading/engagement start time
+    this.pageStartTime = Date.now();
 
     this.trackEvent('pageview', {
       // Page info
@@ -232,13 +292,24 @@ class OutboundIntentTracker {
       hash: window.location.hash,
       fullUrl: window.location.href,
       
-      // Referrer
+      // Referrer & Source
       referrer: document.referrer,
       referrerDomain: document.referrer ? new URL(document.referrer).hostname : null,
+      defaultChannelSource: defaultChannel,
       
-      // UTM & Campaign tracking
+      // UTM & Campaign tracking (all parameters)
       ...utmParams,
       hasUtm: Object.keys(utmParams).length > 0,
+      allUrlParams: Object.fromEntries(urlParams.entries()), // ALL query params
+      
+      // Visit tracking
+      visitNumber: visitCount,
+      isFirstVisit: visitCount === 1,
+      isReturnVisitor: visitCount > 1,
+      
+      // Cross-device tracking
+      deviceFingerprint,
+      browserId: this.getBrowserId(), // Persistent browser ID
       
       // Device & Browser
       screenWidth: window.screen.width,
@@ -256,16 +327,27 @@ class OutboundIntentTracker {
       cookieEnabled: navigator.cookieEnabled,
       doNotTrack: navigator.doNotTrack,
       
+      // Network context (without external APIs)
+      connectionType: (navigator as any).connection?.effectiveType, // 4g, 3g, 2g, slow-2g
+      connectionDownlink: (navigator as any).connection?.downlink, // Mbps
+      connectionRtt: (navigator as any).connection?.rtt, // Round-trip time
+      
       // Location & Time
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       timezoneOffset: new Date().getTimezoneOffset(),
+      localTime: new Date().toISOString(),
+      localHour: new Date().getHours(),
+      localDayOfWeek: new Date().getDay(), // 0-6
+      isWeekend: [0, 6].includes(new Date().getDay()),
+      isBusinessHours: this.isBusinessHours(),
       
-      // Page performance (if available)
+      // Page performance
       loadTime: performance.timing ? (performance.timing.loadEventEnd - performance.timing.navigationStart) : null,
+      domContentLoaded: performance.timing ? (performance.timing.domContentLoadedEventEnd - performance.timing.navigationStart) : null,
       
-      // Cookies (for fingerprinting)
-      cookieCount: Object.keys(cookies).length,
-      hasCookies: Object.keys(cookies).length > 0
+      // Previous page (backtracking detection)
+      previousPage: this.getPreviousPage(),
+      isBacktracking: this.isBacktrackingBehavior()
     });
   }
 
@@ -426,15 +508,82 @@ class OutboundIntentTracker {
     }, 1000);
   }
 
+  // Reading time tracking (scroll speed = reading speed)
+  private startReadingTimeTracking(): void {
+    let lastScrollPosition = 0;
+    let lastScrollTime = Date.now();
+    let readingTime = 0; // Time spent reading (slow scrolling or stationary)
+    let scanningTime = 0; // Time spent fast scrolling
+    
+    setInterval(() => {
+      if (document.hidden || !this.isActive) return;
+      
+      const currentScroll = window.pageYOffset || document.documentElement.scrollTop;
+      const scrollDelta = Math.abs(currentScroll - lastScrollPosition);
+      const timeDelta = Date.now() - lastScrollTime;
+      
+      if (scrollDelta < 50 && timeDelta >= 1000) {
+        // Stationary for 1 second = reading
+        readingTime += 1;
+      } else if (scrollDelta > 300) {
+        // Fast scroll = scanning
+        scanningTime += 1;
+      } else if (scrollDelta > 0 && scrollDelta < 300) {
+        // Slow scroll = reading while scrolling
+        readingTime += 1;
+      }
+      
+      lastScrollPosition = currentScroll;
+      lastScrollTime = Date.now();
+      
+      // Store for page_exit event
+      (window as any)._oie_reading_time = readingTime;
+      (window as any)._oie_scanning_time = scanningTime;
+    }, 1000);
+  }
+
   private setupUnloadBeacon(): void {
     window.addEventListener('beforeunload', () => {
+      const totalTime = Math.round((Date.now() - this.pageStartTime) / 1000);
+      const readingTime = (window as any)._oie_reading_time || 0;
+      const scanningTime = (window as any)._oie_scanning_time || 0;
+      
       this.trackEvent('page_exit', {
         activeTime: this.activeTime,
-        totalTime: Math.round((Date.now() - this.pageStartTime) / 1000),
-        maxScrollDepth: this.maxScrollDepth
+        totalTime,
+        maxScrollDepth: this.maxScrollDepth,
+        
+        // Reading quality metrics (#3)
+        readingTime,  // Slow scroll or stationary
+        scanningTime, // Fast scrolling
+        readingRatio: totalTime > 0 ? readingTime / totalTime : 0,
+        engagementQuality: readingTime > scanningTime ? 'high' : 'low',
+        
+        // Content depth (#5)
+        pagesThisSession: this.getPageCountThisSession(),
+        timePerPage: this.getAverageTimePerPage(),
+        
+        // Device context
+        deviceFingerprint: this.generateDeviceFingerprint(),
+        browserId: this.getBrowserId()
       });
       this.flush(true); // Force send with beacon
     });
+  }
+
+  private getPageCountThisSession(): number {
+    try {
+      const history = JSON.parse(sessionStorage.getItem('_oie_page_history') || '[]');
+      return history.length;
+    } catch (e) {
+      return 1;
+    }
+  }
+
+  private getAverageTimePerPage(): number {
+    const pageCount = this.getPageCountThisSession();
+    const totalTime = Math.round((Date.now() - this.sessionStartTime) / 1000);
+    return pageCount > 0 ? Math.round(totalTime / pageCount) : totalTime;
   }
 
   private trackEvent(type: string, data?: Record<string, any>): void {
@@ -520,6 +669,137 @@ class OutboundIntentTracker {
     }
   }
 
+  // Visit count tracking
+  private getVisitCount(): number {
+    try {
+      const visits = localStorage.getItem('_oie_visit_count');
+      const currentCount = visits ? parseInt(visits) : 0;
+      const newCount = currentCount + 1;
+      localStorage.setItem('_oie_visit_count', newCount.toString());
+      localStorage.setItem('_oie_last_visit', Date.now().toString());
+      return newCount;
+    } catch (e) {
+      return 1;
+    }
+  }
+
+  // Default channel source (when no UTM)
+  private getDefaultChannelSource(): string {
+    const referrer = document.referrer;
+    if (!referrer) return 'direct';
+    
+    const domain = new URL(referrer).hostname.toLowerCase();
+    
+    // Search engines
+    if (domain.includes('google.')) return 'organic_search_google';
+    if (domain.includes('bing.')) return 'organic_search_bing';
+    if (domain.includes('yahoo.')) return 'organic_search_yahoo';
+    if (domain.includes('duckduckgo.')) return 'organic_search_duckduckgo';
+    
+    // Social media
+    if (domain.includes('facebook.') || domain.includes('fb.')) return 'social_facebook';
+    if (domain.includes('linkedin.')) return 'social_linkedin';
+    if (domain.includes('twitter.') || domain.includes('t.co')) return 'social_twitter';
+    if (domain.includes('instagram.')) return 'social_instagram';
+    
+    // If from same domain
+    if (domain === window.location.hostname) return 'internal';
+    
+    // Otherwise it's a referral
+    return `referral_${domain}`;
+  }
+
+  // Device fingerprint (cross-device/browser tracking)
+  private generateDeviceFingerprint(): string {
+    const components = [
+      navigator.userAgent,
+      navigator.language,
+      screen.width + 'x' + screen.height,
+      screen.colorDepth,
+      new Date().getTimezoneOffset(),
+      !!window.sessionStorage,
+      !!window.localStorage,
+      navigator.platform
+    ];
+    
+    const fingerprint = components.join('|');
+    let hash = 0;
+    for (let i = 0; i < fingerprint.length; i++) {
+      const char = fingerprint.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash;
+    }
+    return hash.toString(36);
+  }
+
+  // Persistent browser ID (cross-tab tracking)
+  private getBrowserId(): string {
+    try {
+      let browserId = localStorage.getItem('_oie_browser_id');
+      if (!browserId) {
+        browserId = this.generateSessionId() + '-' + Date.now();
+        localStorage.setItem('_oie_browser_id', browserId);
+      }
+      return browserId;
+    } catch (e) {
+      return 'unknown';
+    }
+  }
+
+  // Business hours detection
+  private isBusinessHours(): boolean {
+    const hour = new Date().getHours();
+    const day = new Date().getDay();
+    // Monday-Friday, 9am-5pm local time
+    return day >= 1 && day <= 5 && hour >= 9 && hour < 17;
+  }
+
+  // Previous page tracking (backtracking detection)
+  private getPreviousPage(): string | null {
+    try {
+      return sessionStorage.getItem('_oie_previous_page');
+    } catch (e) {
+      return null;
+    }
+  }
+
+  private savePreviousPage(url: string): void {
+    try {
+      sessionStorage.setItem('_oie_previous_page', url);
+    } catch (e) {
+      // Ignore
+    }
+  }
+
+  // Backtracking behavior detection
+  private isBacktrackingBehavior(): boolean {
+    const previous = this.getPreviousPage();
+    const current = window.location.pathname;
+    
+    if (!previous) return false;
+    
+    // Check if returning to a previously visited page in this session
+    try {
+      const history = JSON.parse(sessionStorage.getItem('_oie_page_history') || '[]');
+      return history.includes(current) && history[history.length - 1] !== current;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  private updatePageHistory(): void {
+    try {
+      const history = JSON.parse(sessionStorage.getItem('_oie_page_history') || '[]');
+      history.push(window.location.pathname);
+      // Keep last 20 pages
+      if (history.length > 20) history.shift();
+      sessionStorage.setItem('_oie_page_history', JSON.stringify(history));
+      sessionStorage.setItem('_oie_previous_page', window.location.pathname);
+    } catch (e) {
+      // Ignore
+    }
+  }
+
   // Email capture for de-anonymization
   private async captureEmailForIdentity(email: string): Promise<void> {
     if (!email || !email.includes('@')) return;
@@ -530,6 +810,7 @@ class OutboundIntentTracker {
     // Track that we captured an email (for de-anonymization)
     this.trackEvent('email_identified', {
       emailHash: hashes.sha256,
+      emailDomain: email.split('@')[1],
       wasAnonymous: this.visitorId === null,
       sessionId: this.sessionId
     });
@@ -539,9 +820,18 @@ class OutboundIntentTracker {
     try {
       // Store email hash for later de-anonymization
       localStorage.setItem('_oie_email_hash', hash);
-      localStorage.setItem('_oie_email', email); // Store for reference (optional)
+      localStorage.setItem('_oie_email_domain', email.split('@')[1]);
     } catch (e) {
       console.log('Failed to store email hash', e);
+    }
+  }
+
+  // Company domain extraction (from email)
+  private getCompanyDomain(): string | null {
+    try {
+      return localStorage.getItem('_oie_email_domain');
+    } catch (e) {
+      return null;
     }
   }
 
