@@ -24,12 +24,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.BIGQUERY_CREDENTIALS }}
+
       - name: Setup Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
         with:
-          service_account_key: ${{ secrets.BIGQUERY_CREDENTIALS }}
           project_id: ${{ secrets.BIGQUERY_PROJECT_ID }}
-          export_default_credentials: true
 
       - name: Sync leads to KV
         env:
@@ -38,6 +41,7 @@ jobs:
           KV_IDENTITY_STORE_ID: 84ed00a75f6f44adb62d4d7bbec149ae
           BIGQUERY_PROJECT_ID: ${{ secrets.BIGQUERY_PROJECT_ID }}
           BIGQUERY_DATASET: outbound_sales
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
         run: npm run sync-personalization
 
       - name: Sync summary
