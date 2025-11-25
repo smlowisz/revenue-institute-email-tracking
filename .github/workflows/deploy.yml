@@ -26,13 +26,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build tracking pixel
-        run: npm run build:pixel
-
-      - name: Update pixel bundle
-        run: |
-          echo "export const PIXEL_CODE_BASE64 = '$(base64 -w 0 < dist/pixel.iife.js)';" > src/worker/pixel-bundle.ts
-
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
         with:
