@@ -1,0 +1,77 @@
+{
+  "name": "Sync BigQuery to Cloudflare KV (Hourly)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "Schedule Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "projectId": "n8n-revenueinstitute",
+        "query": "SELECT trackingId, person_name, email, company_name, company_size, revenue, industry, job_title, seniority, department, phone, linkedin, company_website FROM `outbound_sales.leads` WHERE trackingId IS NOT NULL AND (inserted_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) OR trackingId IN (SELECT DISTINCT visitorId FROM `outbound_sales.events` WHERE _insertedAt >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR))) LIMIT 1000"
+      },
+      "name": "Get New/Active Leads",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = [];\n\nfor (const lead of $input.all()) {\n  const personName = lead.json.person_name || '';\n  const nameParts = personName.split(' ');\n  \n  items.push({\n    json: {\n      key: lead.json.trackingId,\n      value: JSON.stringify({\n        firstName: nameParts[0] || '',\n        lastName: nameParts.slice(1).join(' ') || '',\n        personName: personName,\n        email: lead.json.email,\n        phone: lead.json.phone,\n        linkedin: lead.json.linkedin,\n        company: lead.json.company_name,\n        companyName: lead.json.company_name,\n        domain: lead.json.company_website || (lead.json.email ? lead.json.email.split('@')[1] : ''),\n        companyWebsite: lead.json.company_website,\n        companySize: lead.json.company_size,\n        revenue: lead.json.revenue,\n        industry: lead.json.industry,\n        jobTitle: lead.json.job_title,\n        seniority: lead.json.seniority,\n        department: lead.json.department,\n        isFirstVisit: true,\n        intentScore: 0,\n        engagementLevel: 'new'\n      }),\n      expiration_ttl: 7776000\n    }\n  });\n}\n\nreturn items;"
+      },
+      "name": "Transform to KV Format",
+      "type": "n8n-nodes-base.code",
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "https://api.cloudflare.com/client/v4/accounts/e406ada6b728029380a6465d03932cb8/storage/kv/namespaces/84ed00a75f6f44adb62d4d7bbec149ae/bulk",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "={{$json.key}}",
+              "value": "={{$json.value}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Upload to Cloudflare KV",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [850, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Cloudflare API Token",
+          "value": "b2eUcOm0HJSnK2G-DQQbSzUmjQLL34J20ZQxo1o_"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Every Hour": {
+      "main": [[{"node": "Get New/Active Leads", "type": "main", "index": 0}]]
+    },
+    "Get New/Active Leads": {
+      "main": [[{"node": "Transform to KV Format", "type": "main", "index": 0}]]
+    },
+    "Transform to KV Format": {
+      "main": [[{"node": "Upload to Cloudflare KV", "type": "main", "index": 0}]]
+    }
+  }
+}
+

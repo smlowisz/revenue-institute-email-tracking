@@ -29,18 +29,16 @@ jobs:
       - name: Build tracking pixel
         run: npm run build:pixel
 
+      - name: Update pixel bundle
+        run: |
+          echo "export const PIXEL_CODE_BASE64 = '$(base64 < dist/pixel.iife.js)';" > src/worker/pixel-bundle.ts
+
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: deploy
-        env:
-          BIGQUERY_PROJECT_ID: ${{ secrets.BIGQUERY_PROJECT_ID }}
-          BIGQUERY_DATASET: ${{ secrets.BIGQUERY_DATASET }}
-          BIGQUERY_CREDENTIALS: ${{ secrets.BIGQUERY_CREDENTIALS }}
-          EVENT_SIGNING_SECRET: ${{ secrets.EVENT_SIGNING_SECRET }}
-          ALLOWED_ORIGINS: ${{ secrets.ALLOWED_ORIGINS }}
 
       - name: Deployment summary
         run: |
