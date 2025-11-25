@@ -65,6 +65,26 @@ export default {
       });
     }
 
+    if (url.pathname === '/sync-kv-now' && request.method === 'POST') {
+      // Manual trigger for testing KV sync (requires secret)
+      const authHeader = request.headers.get('Authorization');
+      if (authHeader !== `Bearer ${env.EVENT_SIGNING_SECRET}`) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      
+      try {
+        await syncBigQueryToKV(env);
+        return new Response(JSON.stringify({ success: true, message: 'KV sync completed' }), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } catch (error: any) {
+        return new Response(JSON.stringify({ success: false, error: error.message }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
     if (url.pathname === '/pixel.js') {
       // Serve the tracking pixel directly (decode from base64)
       const pixelCode = atob(PIXEL_CODE_BASE64);
