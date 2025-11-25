@@ -7,8 +7,9 @@ account_id = "e406ada6b728029380a6465d03932cb8"
 # Scheduled triggers - runs directly in Worker  
 [triggers]
 crons = [
-  "0 */3 * * *"  # Every 3 hours (8x/day): 12am, 3am, 6am, 9am, 12pm, 3pm, 6pm, 9pm
-  # Syncs ALL new leads (no limit) + recently active visitors
+  "*/5 * * * *"  # Every 5 minutes (288x/day) - REAL-TIME!
+  # Syncs ALL leads added in last 10 minutes
+  # Max delay: 5 minutes
 ]
 
 # KV Namespace for identity and personalization

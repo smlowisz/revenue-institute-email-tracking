@@ -1,33 +1,32 @@
-# 🔄 KV Sync - Keep Personalization Fresh
+# ⚡ Near Real-Time KV Sync - Pure Cloudflare Solution
 
-**ALL done in Cloudflare Workers - no external dependencies!**
+**100% Cloudflare Workers + BigQuery - NO external dependencies!**
 
 ---
 
-## ✅ Automatic Sync (Every 3 Hours)
+## 🚀 Automatic Sync (Every 5 Minutes!)
 
-**Schedule:** 8 times per day
-- 12:00 AM, 3:00 AM, 6:00 AM, 9:00 AM
-- 12:00 PM, 3:00 PM, 6:00 PM, 9:00 PM
+**Schedule:** 288 times per day (every 5 minutes!)
 
 **What it syncs:**
-- ✅ **ALL leads added in last 6 hours** (unlimited!)
-- ✅ **ALL leads who visited in last 6 hours** (behavioral updates)
-- ✅ No 1k limit - syncs everything!
+- ✅ **ALL leads added in last 10 minutes** (unlimited!)
+- ✅ **ALL leads who visited in last 10 minutes** (behavioral updates)
+- ✅ No limit - syncs everything!
 
 **Example:**
-- Add 50,000 leads at 10:00 AM
-- Sync runs at 12:00 PM
-- All 50,000 synced to KV ✅
-- Personalization works for all!
+- 10:00 AM: Add 50,000 leads to BigQuery
+- 10:05 AM: Cron runs, finds all 50,000
+- 10:07 AM: All synced to KV ✅
+- 10:10 AM: Start sending campaigns!
 
-**Max delay:** 3 hours (usually less)
+**Max delay:** 5 minutes ⚡  
+**Typical delay:** 2-7 minutes
 
 ---
 
-## ⚡ Instant Sync (On-Demand)
+## ⚡ Manual Instant Sync (Optional)
 
-**For immediate sync after bulk lead import:**
+**After MASSIVE bulk import (100k+ leads), trigger immediate sync:**
 
 **Webhook endpoint:**
 ```bash
@@ -36,71 +35,64 @@ Authorization: Bearer <YOUR_EVENT_SIGNING_SECRET>
 ```
 
 **Use when:**
-- Just imported 50k leads → Trigger instant sync
-- Need personalization to work immediately
-- Testing new leads
+- Imported 100k+ leads and can't wait 5 minutes
+- Testing
 
 **How to trigger:**
 ```bash
-# Get your secret from Cloudflare
-SECRET="<your-event-signing-secret>"
-
-# Trigger sync
 curl -X POST https://intel.revenueinstitute.com/sync-kv-now \
-  -H "Authorization: Bearer $SECRET"
-
-# Response:
-{"success":true,"message":"KV sync completed","timestamp":"2025-11-25..."}
+  -H "Authorization: Bearer $EVENT_SIGNING_SECRET"
 ```
 
-**From any system:**
-- After bulk lead import in BigQuery
-- From n8n workflow
-- From cron job
-- From Zapier/Make
-- From anywhere via webhook!
+**Response:**
+```json
+{"success":true,"message":"KV sync completed","timestamp":"..."}
+```
+
+**But usually not needed** - automatic 5-min sync is fast enough!
 
 ---
 
-## 🎯 Best Practice Workflow
+## 🎯 How It Works
 
-### **Scenario 1: Bulk Lead Import**
-
-```
-1. Import 50k leads to BigQuery
-   ↓
-2. Immediately trigger webhook:
-   curl -X POST .../sync-kv-now -H "Authorization: Bearer $SECRET"
-   ↓
-3. All 50k synced to KV in ~2-5 minutes
-   ↓
-4. Send email campaigns immediately
-   ↓
-5. Personalization works for everyone!
-```
-
-### **Scenario 2: Ongoing Additions**
+### **Scenario 1: Add Leads Throughout Day**
 
 ```
-Add leads throughout the day
-   ↓
-Automatic sync every 3 hours
-   ↓
-Max 3-hour delay (usually less)
-   ↓
-No manual work needed!
+9:00 AM: Add 100 leads to BigQuery
+9:05 AM: Cron runs, syncs all 100 ✅
+
+11:30 AM: Add 5,000 more leads
+11:35 AM: Cron runs, syncs all 5,000 ✅
+
+2:00 PM: Add 50,000 leads  
+2:05 PM: Cron runs, syncs all 50,000 ✅
+
+Result: Max 5-minute delay, fully automatic!
 ```
 
-### **Scenario 3: Critical/VIP Lead**
+### **Scenario 2: Visitor Returns**
 
 ```
-Add VIP lead to database
-   ↓
-Trigger instant sync webhook
-   ↓
-Send personalized email immediately
-   ↓
-They click and see personalized page!
+Visitor browses site at 10:00 AM
+  → Events tracked to BigQuery
+  ↓
+10:05 AM: Cron runs
+  → Detects recent activity
+  → Updates KV with behavioral data
+  ↓
+Visitor returns at 10:10 AM
+  → Personalization shows updated data!
+```
+
+### **Scenario 3: Bulk Import (100k leads)**
+
+```
+Import 100k leads at 3:00 PM
+  ↓
+3:05 PM: Cron runs (finds all 100k)
+3:10 PM: All synced to KV (takes ~5 min for 100k)
+  ↓
+Start campaigns immediately!
 ```
 
 ---

@@ -266,9 +266,9 @@ async function syncBigQueryToKV(env: Env): Promise<void> {
     const dataset = env.BIGQUERY_DATASET;
     
     // Query for ALL new/recently active leads (no limit!)
-    // Syncs:
-    // 1. ALL leads added in last 6 hours (catches everything between syncs)
-    // 2. ALL leads who visited in last 6 hours (behavioral updates)
+    // Runs every 5 minutes, syncs:
+    // 1. ALL leads added in last 10 minutes (real-time!)
+    // 2. ALL leads who visited in last 10 minutes (behavioral updates)
     const query = `
       SELECT 
         l.trackingId,
@@ -289,11 +289,11 @@ async function syncBigQueryToKV(env: Env): Promise<void> {
       FROM \`${projectId}.${dataset}.leads\` l
       WHERE l.trackingId IS NOT NULL
         AND (
-          l.inserted_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)
+          l.inserted_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 10 MINUTE)
           OR l.trackingId IN (
             SELECT DISTINCT visitorId 
             FROM \`${projectId}.${dataset}.events\`
-            WHERE _insertedAt >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)
+            WHERE _insertedAt >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 10 MINUTE)
               AND visitorId IS NOT NULL
           )
         )
