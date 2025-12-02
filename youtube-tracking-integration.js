@@ -164,7 +164,9 @@
           tracked25: false,
           tracked50: false,
           tracked75: false,
-          tracked100: false
+          tracked100: false,
+          trackedWatched: false,
+          playStartTime: null
         });
 
       } catch (error) {
@@ -180,6 +182,11 @@
     const videoInfo = trackedVideos.get(videoId);
     if (!videoInfo) return;
 
+    // Set play start time when tracking starts
+    if (videoInfo.playStartTime === null) {
+      videoInfo.playStartTime = Date.now();
+    }
+
     // Set up progress tracking interval
     const progressInterval = setInterval(() => {
       try {
@@ -190,6 +197,18 @@
           if (!duration || duration <= 0) return;
 
           const percent = (currentTime / duration) * 100;
+
+          // Track "video_watched" event - fires when user has watched at least 10 seconds OR 25% of video
+          if (!videoInfo.trackedWatched && videoInfo.playStartTime !== null) {
+            const watchedTime = Date.now() - videoInfo.playStartTime;
+            
+            // Fire "video_watched" if: watched 10+ seconds OR reached 25% completion
+            if (currentTime >= 10 || percent >= 25) {
+              videoInfo.trackedWatched = true;
+              console.log('🎥 YouTube video watched event triggered');
+              trackVideoWatched(videoId, currentTime, percent, Math.round(watchedTime / 1000));
+            }
+          }
 
           // Track progress milestones
           if (percent >= 25 && !videoInfo.tracked25) {
@@ -234,6 +253,10 @@
     switch (state) {
       case YT.PlayerState.PLAYING:
         console.log('🎥 YouTube video play:', videoId);
+        const videoInfo = trackedVideos.get(videoId);
+        if (videoInfo) {
+          videoInfo.playStartTime = Date.now();
+        }
         trackVideoPlay(videoId);
         break;
 
@@ -309,6 +332,23 @@
         videoId: videoId,
         platform: 'youtube',
         duration: duration
+      });
+    }
+  }
+
+  /**
+   * Track video watched event (fires when user watches 10+ seconds OR 25% of video)
+   */
+  function trackVideoWatched(videoId, watchedSeconds, watchedPercent, watchTime) {
+    if (window.oieTracker) {
+      window.oieTracker.track('video_watched', {
+        src: `https://www.youtube.com/watch?v=${videoId}`,
+        videoId: videoId,
+        platform: 'youtube',
+        watchedSeconds: watchedSeconds,
+        watchedPercent: Math.round(watchedPercent),
+        watchTime: watchTime, // seconds since play started
+        threshold: watchedSeconds >= 10 ? 'time' : 'percentage'
       });
     }
   }

@@ -223,7 +223,9 @@ export default {
           tracked25: false,
           tracked50: false,
           tracked75: false,
-          tracked100: false
+          tracked100: false,
+          trackedWatched: false,
+          playStartTime: null
         });
       } catch (error) {
         console.error('🎥 Error initializing YouTube player:', error);
@@ -233,6 +235,9 @@ export default {
   function setupVideoTracking(player, videoId) {
     const videoInfo = trackedVideos.get(videoId);
     if (!videoInfo) return;
+    if (videoInfo.playStartTime === null) {
+      videoInfo.playStartTime = Date.now();
+    }
     const progressInterval = setInterval(() => {
       try {
         if (player.getPlayerState() === YT.PlayerState.PLAYING) {
@@ -240,6 +245,14 @@ export default {
           const duration = player.getDuration();
           if (!duration || duration <= 0) return;
           const percent = (currentTime / duration) * 100;
+          if (!videoInfo.trackedWatched && videoInfo.playStartTime !== null) {
+            const watchedTime = Date.now() - videoInfo.playStartTime;
+            if (currentTime >= 10 || percent >= 25) {
+              videoInfo.trackedWatched = true;
+              console.log('🎥 YouTube video watched event triggered');
+              trackVideoWatched(videoId, currentTime, percent, Math.round(watchedTime / 1000));
+            }
+          }
           if (percent >= 25 && !videoInfo.tracked25) {
             videoInfo.tracked25 = true;
             console.log('🎥 YouTube video progress: 25%');
@@ -274,6 +287,10 @@ export default {
     switch (state) {
       case YT.PlayerState.PLAYING:
         console.log('🎥 YouTube video play:', videoId);
+        const videoInfo = trackedVideos.get(videoId);
+        if (videoInfo) {
+          videoInfo.playStartTime = Date.now();
+        }
         trackVideoPlay(videoId);
         break;
       case YT.PlayerState.PAUSED:
@@ -331,6 +348,19 @@ export default {
         videoId: videoId,
         platform: 'youtube',
         duration: duration
+      });
+    }
+  }
+  function trackVideoWatched(videoId, watchedSeconds, watchedPercent, watchTime) {
+    if (window.oieTracker) {
+      window.oieTracker.track('video_watched', {
+        src: \`https://www.youtube.com/watch?v=\${videoId}\`,
+        videoId: videoId,
+        platform: 'youtube',
+        watchedSeconds: watchedSeconds,
+        watchedPercent: Math.round(watchedPercent),
+        watchTime: watchTime,
+        threshold: watchedSeconds >= 10 ? 'time' : 'percentage'
       });
     }
   }

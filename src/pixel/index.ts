@@ -562,6 +562,8 @@ class OutboundIntentTracker {
     (video as any)._oieTracked = true;
 
     let tracked25 = false, tracked50 = false, tracked75 = false, tracked100 = false;
+    let trackedWatched = false;
+    let playStartTime: number | null = null;
 
     const getVideoInfo = () => ({
       src: video.src || video.currentSrc || null,
@@ -576,6 +578,7 @@ class OutboundIntentTracker {
       
       video.addEventListener('play', () => {
         this.log('🎥 Video play event detected');
+        playStartTime = Date.now();
         this.trackEvent('video_play', getVideoInfo());
       }, { passive: true });
 
@@ -594,6 +597,25 @@ class OutboundIntentTracker {
         }
 
         const percent = (video.currentTime / video.duration) * 100;
+        
+        // Track "video_watched" event - fires when user has watched at least 10 seconds OR 25% of video
+        if (!trackedWatched && playStartTime !== null) {
+          const watchedSeconds = video.currentTime;
+          const watchedTime = Date.now() - playStartTime;
+          
+          // Fire "video_watched" if: watched 10+ seconds OR reached 25% completion
+          if (watchedSeconds >= 10 || percent >= 25) {
+            trackedWatched = true;
+            this.log('🎥 Video watched event triggered');
+            this.trackEvent('video_watched', {
+              ...getVideoInfo(),
+              watchedSeconds: watchedSeconds,
+              watchedPercent: Math.round(percent),
+              watchTime: Math.round(watchedTime / 1000), // seconds since play started
+              threshold: watchedSeconds >= 10 ? 'time' : 'percentage'
+            });
+          }
+        }
         
         if (percent >= 25 && !tracked25) {
           tracked25 = true;
