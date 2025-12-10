@@ -40,9 +40,8 @@ vars = { ENVIRONMENT = "production" }
 vars = { ENVIRONMENT = "staging" }
 
 # Secrets (set via: wrangler secret put SECRET_NAME)
-# - BIGQUERY_PROJECT_ID
-# - BIGQUERY_DATASET
-# - BIGQUERY_CREDENTIALS (JSON service account key)
+# - SUPABASE_URL
+# - SUPABASE_SERVICE_ROLE_KEY
 # - EVENT_SIGNING_SECRET
 # - ALLOWED_ORIGINS
 

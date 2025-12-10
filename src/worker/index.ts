@@ -1,16 +1,16 @@
 /**
  * Outbound Intent Engine - Cloudflare Worker
- * Edge worker for event ingestion, validation, and forwarding to BigQuery
+ * Edge worker for event ingestion, validation, and forwarding to Supabase
  */
 
 import { PIXEL_CODE_BASE64 } from './pixel-bundle';
+import { SupabaseClient } from './supabase';
 
 export interface Env {
   IDENTITY_STORE: KVNamespace;
   PERSONALIZATION: KVNamespace;
-  BIGQUERY_PROJECT_ID: string;
-  BIGQUERY_DATASET: string;
-  BIGQUERY_CREDENTIALS: string;
+  SUPABASE_URL: string;
+  SUPABASE_SERVICE_ROLE_KEY: string;
   EVENT_SIGNING_SECRET: string;
   ALLOWED_ORIGINS: string;
   ENVIRONMENT: string;
@@ -67,7 +67,7 @@ export default {
 
     if (url.pathname === '/test-video-event' && request.method === 'POST') {
       // Manual test endpoint to insert a video event directly
-      // This bypasses client-side tracking to test BigQuery insertion
+      // This bypasses client-side tracking to test Supabase insertion
       const authHeader = request.headers.get('Authorization');
       if (authHeader !== `Bearer ${env.EVENT_SIGNING_SECRET}`) {
         return new Response('Unauthorized', { status: 401 });
@@ -139,7 +139,7 @@ export default {
       console.log('🔔 Manual KV sync triggered via webhook');
       
       try {
-        await syncBigQueryToKV(env);
+        await syncSupabaseToKV(env);
         return new Response(JSON.stringify({ 
           success: true, 
           message: 'KV sync completed',
@@ -952,7 +952,7 @@ export default {
       });
       console.log('✅ Test video_watched event sent!');
     }, 2000);
-    console.log('🧪 Test complete! Check BigQuery in 1-2 minutes.');
+    console.log('🧪 Test complete! Check Supabase in 1-2 minutes.');
   };
   window.debugVideoTracking = function() {
     console.log('🔍 Video Tracking Debug Info:');
@@ -999,7 +999,7 @@ export default {
     console.log('🔄 Hourly KV sync started:', new Date().toISOString());
     
     try {
-      await syncBigQueryToKV(env);
+      await syncSupabaseToKV(env);
       console.log('✅ Hourly KV sync completed successfully');
     } catch (error: any) {
       console.error('❌ KV sync failed:', error.message);
@@ -1058,7 +1058,7 @@ async function handleTrackEvents(request: Request, env: Env, ctx: ExecutionConte
     try {
       await storeEvents(enrichedEvents, env);
       storeSuccess = true;
-      console.log('✅ Events stored successfully in BigQuery');
+      console.log('✅ Events stored successfully in Supabase');
     } catch (error: any) {
       storeSuccess = false;
       storeError = error.message;
@@ -1096,7 +1096,31 @@ async function handleTrackEvents(request: Request, env: Env, ctx: ExecutionConte
 }
 
 /**
+ * Map old event type names to new ones
+ */
+function normalizeEventType(type: string): string {
+  // Map old names to new names if needed
+  const typeMap: Record<string, string> = {
+    'email_identified': 'email_captured', // Old name -> new name
+    'pageview': 'page_view' // Ensure underscore format
+  };
+  return typeMap[type] || type;
+}
+
+/**
+ * Determine event category based on event type
+ */
+function getEventCategory(type: string): 'website' | 'email' | 'system' {
+  const emailEvents = ['email_sent', 'email_bounced', 'email_replied', 'email_click'];
+  const systemEvents = ['email_captured', 'identify', 'browser_emails_scanned'];
+  if (emailEvents.includes(type)) return 'email';
+  if (systemEvents.includes(type)) return 'system';
+  return 'website';
+}
+
+/**
  * Enrich event with server-side data
+ * Returns event formatted for Supabase schema
  */
 function enrichEvent(event: TrackingEvent, request: Request): any {
   // Server-side enrichment with ALL available data
@@ -1114,54 +1138,81 @@ function enrichEvent(event: TrackingEvent, request: Request): any {
   // Use last 2 octets of IP as company identifier (same subnet = likely same company)
   const companyIdentifier = ip ? hashString(ip.split('.').slice(0, 2).join('.')) : null;
 
+  // Map to Supabase schema
+  const normalizedType = normalizeEventType(event.type);
   return {
-    ...(event as any),
+    // Event identification
+    category: getEventCategory(normalizedType),
+    type: normalizedType,
     
-    // Server timestamps
-    serverTimestamp: Date.now(),
+    // Session and lead IDs will be set by storeEvents
+    session_id: null, // Will be set by storeEvents
+    lead_id: null, // Will be set by storeEvents
+    
+    // Page context
+    url: event.url,
+    referrer: event.referrer,
+    referer_header: referer,
+    
+    // Event data (store original sessionId for aggregation)
+    data: {
+      ...(event.data || {}),
+      _originalSessionId: event.sessionId // Store original string sessionId for session aggregation
+    },
     
     // IP & Geo
-    ip,
-    ipHash: ip ? hashString(ip) : null, // Hashed IP for privacy
-    companyIdentifier, // Same subnet = likely same company
+    ip_address: ip,
+    company_identifier: companyIdentifier,
     country,
-    city: request.cf?.city,
-    region: request.cf?.region,
-    continent: request.cf?.continent,
-    postalCode: request.cf?.postalCode,
-    metroCode: request.cf?.metroCode,
-    latitude: request.cf?.latitude,
-    longitude: request.cf?.longitude,
-    timezone: request.cf?.timezone,
+    city: request.cf?.city || null,
+    region: request.cf?.region || null,
+    continent: request.cf?.continent || null,
+    postal_code: request.cf?.postalCode || null,
+    metro_code: request.cf?.metroCode || null,
+    latitude: request.cf?.latitude?.toString() || null,
+    longitude: request.cf?.longitude?.toString() || null,
+    timezone: request.cf?.timezone || null,
     
     // Network info
-    colo: request.cf?.colo, // Cloudflare datacenter
-    asn: request.cf?.asn, // Autonomous System Number
-    asOrganization: request.cf?.asOrganization, // ISP/Company name
+    colo: request.cf?.colo || null,
+    asn: request.cf?.asn ? Number(request.cf.asn) : null,
+    organization_identifier: request.cf?.asOrganization || null,
     
     // Request headers
-    userAgent,
-    acceptLanguage,
-    refererHeader: referer,
+    user_agent: userAgent || null,
+    default_language: acceptLanguage || null,
     
-    // URL breakdown
-    urlParams, // All query parameters
-    utmSource: urlParams.utm_source || null,
-    utmMedium: urlParams.utm_medium || null,
-    utmCampaign: urlParams.utm_campaign || null,
-    utmTerm: urlParams.utm_term || null,
-    utmContent: urlParams.utm_content || null,
+    // URL parameters (stored as TEXT - JSON string)
+    url_parms: urlParams && Object.keys(urlParams).length > 0 ? JSON.stringify(urlParams) : null,
+    utm_source: urlParams.utm_source || null,
+    utm_medium: urlParams.utm_medium || null,
+    utm_campaign: urlParams.utm_campaign || null,
+    utm_term: urlParams.utm_term || null,
+    utm_content: urlParams.utm_content || null,
     gclid: urlParams.gclid || null,
     fbclid: urlParams.fbclid || null,
     
     // Device hints (from Cloudflare)
-    deviceType: request.cf?.deviceType, // desktop, mobile, tablet
-    isEUCountry: request.cf?.isEUCountry,
+    device_type: request.cf?.deviceType || null,
+    is_eu_country: request.cf?.isEUCountry || false,
     
     // TLS/Security
-    tlsVersion: request.cf?.tlsVersion,
-    tlsCipher: request.cf?.tlsCipher,
-    httpProtocol: request.cf?.httpProtocol
+    tls_version: request.cf?.tlsVersion || null,
+    tls_cipher: request.cf?.tlsCipher || null,
+    http_protocol: request.cf?.httpProtocol || null,
+    
+    // Foreign keys (set from event data if available - UUID or null)
+    campaign_id: event.data?.campaign_id && isValidUUID(event.data.campaign_id) ? event.data.campaign_id : null,
+    message_id: event.data?.message_id && isValidUUID(event.data.message_id) ? event.data.message_id : null,
+    
+    // Timestamps
+    created_at: new Date(event.timestamp).toISOString(),
+    updated_at: new Date().toISOString(),
+    
+    // Keep original fields for reference during migration
+    _originalSessionId: event.sessionId,
+    _originalVisitorId: event.visitorId,
+    _originalTimestamp: event.timestamp
   };
 }
 
@@ -1177,125 +1228,93 @@ function hashString(str: string): string {
 }
 
 /**
- * Sync BigQuery leads to Cloudflare KV (runs hourly via cron)
+ * Validate UUID format
  */
-async function syncBigQueryToKV(env: Env): Promise<void> {
-  console.log('📊 Starting BigQuery → KV sync...');
+function isValidUUID(uuid: string): boolean {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return uuidRegex.test(uuid);
+}
+
+/**
+ * Sync Supabase leads to Cloudflare KV (runs hourly via cron)
+ */
+async function syncSupabaseToKV(env: Env): Promise<void> {
+  console.log('📊 Starting Supabase → KV sync...');
   
   try {
-    const token = await createBigQueryToken(JSON.parse(env.BIGQUERY_CREDENTIALS));
-    const projectId = env.BIGQUERY_PROJECT_ID;
-    const dataset = env.BIGQUERY_DATASET;
+    const supabase = new SupabaseClient(env);
     
-    // Query for ALL new/recently active leads (no limit!)
-    // Runs every 5 minutes, syncs:
-    // 1. ALL leads added in last 10 minutes (real-time!)
-    // 2. ALL leads who visited in last 10 minutes (behavioral updates)
-    const query = `
-      SELECT 
-        l.trackingId,
-        l.firstName,
-        l.lastName,
-        l.person_name,
-        l.email,
-        l.company_name,
-        l.company_website,
-        l.company_size,
-        l.revenue,
-        l.industry,
-        l.job_title,
-        l.seniority,
-        l.department,
-        l.phone,
-        l.linkedin,
-        l.company_linkedin,
-        l.company_description
-      FROM \`${projectId}.${dataset}.leads\` l
-      WHERE l.trackingId IS NOT NULL
-        AND (
-          l.inserted_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 10 MINUTE)
-          OR l.trackingId IN (
-            SELECT DISTINCT visitorId 
-            FROM \`${projectId}.${dataset}.events\`
-            WHERE _insertedAt >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 10 MINUTE)
-              AND visitorId IS NOT NULL
-          )
-        )
-    `;
+    // Get leads updated in last 10 minutes or with recent events
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
     
-    const queryUrl = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/queries`;
+    // Query leads updated recently (using proper PostgREST syntax)
+    const leadsResponse = await supabase.request(
+      'GET',
+      `/lead?tracking_id=not.is.null&updated_at=gte.${encodeURIComponent(tenMinutesAgo)}&select=*&order=updated_at.desc`
+    );
+    let leads = leadsResponse || [];
     
-    const response = await fetch(queryUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        query,
-        useLegacySql: false
-      })
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      let errorMessage = `BigQuery query failed: ${response.status}`;
+    // Also get leads with recent events
+    try {
+      const recentEventsResponse = await supabase.request(
+        'GET',
+        `/event?created_at=gte.${encodeURIComponent(tenMinutesAgo)}&select=lead_id`
+      );
+      const recentEvents = recentEventsResponse || [];
       
-      try {
-        const errorJson = JSON.parse(errorText);
-        if (errorJson.error?.message) {
-          errorMessage = `BigQuery query failed: ${response.status} - ${errorJson.error.message}`;
-        } else if (errorJson.error) {
-          errorMessage = `BigQuery query failed: ${response.status} - ${JSON.stringify(errorJson.error)}`;
-        }
-      } catch (e) {
-        // If error response isn't JSON, use the text
-        errorMessage = `BigQuery query failed: ${response.status} - ${errorText.substring(0, 200)}`;
+      // Extract unique lead IDs from events
+      const leadIdsFromEvents = [...new Set(recentEvents.map((e: any) => e.lead_id).filter(Boolean))];
+      
+      // Get leads from events if not already in list
+      if (leadIdsFromEvents.length > 0) {
+        // PostgREST in operator syntax
+        const leadIdsParam = leadIdsFromEvents.map(id => `"${id}"`).join(',');
+        const additionalLeadsResponse = await supabase.request(
+          'GET',
+          `/lead?id=in.(${leadIdsParam})&tracking_id=not.is.null&select=*`
+        );
+        const additionalLeads = additionalLeadsResponse || [];
+        
+        // Merge and deduplicate
+        const existingIds = new Set(leads.map((l: any) => l.id));
+        const newLeads = additionalLeads.filter((l: any) => !existingIds.has(l.id));
+        leads = [...leads, ...newLeads];
       }
-      
-      console.error('❌ BigQuery query error details:', {
-        status: response.status,
-        statusText: response.statusText,
-        error: errorText
-      });
-      
-      throw new Error(errorMessage);
+    } catch (error) {
+      console.warn('Could not fetch leads from recent events:', error);
+      // Continue with just the updated leads
     }
     
-    const result = await response.json() as any;
-    
-    if (!result.rows || result.rows.length === 0) {
+    if (!leads || leads.length === 0) {
       console.log('ℹ️ No new leads to sync');
       return;
     }
     
-    console.log(`📦 Found ${result.rows.length} leads to sync`);
+    console.log(`📦 Found ${leads.length} leads to sync`);
     
     // Transform and upload to KV
     let synced = 0;
-    for (const row of result.rows) {
-      const f = row.f;
-      
+    for (const lead of leads) {
       const personalizationData = {
-        trackingId: f[0].v,
-        firstName: f[1].v || '',
-        lastName: f[2].v || '',
-        personName: f[3].v || '',
-        email: f[4].v,
-        company: f[5].v,
-        companyName: f[5].v,
-        domain: f[6].v || (f[4].v ? f[4].v.split('@')[1] : ''),
-        companyWebsite: f[6].v,
-        companySize: f[7].v,
-        revenue: f[8].v,
-        industry: f[9].v,
-        jobTitle: f[10].v,
-        seniority: f[11].v,
-        department: f[12].v,
-        phone: f[13].v,
-        linkedin: f[14].v,
-        companyLinkedin: f[15].v,
-        companyDescription: f[16].v,
+        trackingId: lead.tracking_id,
+        firstName: lead.first_name || '',
+        lastName: lead.last_name || '',
+        personName: lead.first_name && lead.last_name ? `${lead.first_name} ${lead.last_name}` : '',
+        email: lead.work_email || lead.personal_email,
+        company: lead.company_name,
+        companyName: lead.company_name,
+        domain: lead.company_website || (lead.work_email || lead.personal_email ? (lead.work_email || lead.personal_email).split('@')[1] : ''),
+        companyWebsite: lead.company_website,
+        companySize: lead.company_headcount,
+        revenue: lead.company_revenue,
+        industry: lead.company_industry,
+        jobTitle: lead.job_title,
+        seniority: lead.job_seniority,
+        department: lead.job_department,
+        phone: lead.phone,
+        linkedin: lead.linkedin_url,
+        companyLinkedin: lead.company_linkedin,
+        companyDescription: lead.company_description,
         isFirstVisit: true,
         intentScore: 0,
         engagementLevel: 'new',
@@ -1303,13 +1322,14 @@ async function syncBigQueryToKV(env: Env): Promise<void> {
       };
       
       // Store in KV with 90-day expiration
+      if (lead.tracking_id) {
       await env.IDENTITY_STORE.put(
-        f[0].v, // trackingId
+          lead.tracking_id,
         JSON.stringify(personalizationData),
         { expirationTtl: 90 * 24 * 60 * 60 }
       );
-      
       synced++;
+      }
     }
     
     console.log(`✅ Synced ${synced} leads to KV`);
@@ -1321,81 +1341,89 @@ async function syncBigQueryToKV(env: Env): Promise<void> {
 }
 
 /**
- * Store events in BigQuery
+ * Store events in Supabase
+ * OPTIMIZED: Batch creates leads/sessions ONCE per batch instead of per-event
  */
-async function storeEvents(events: any[], env: Env): Promise<void> {
-  console.log('🔄 storeEvents called with', events.length, 'events');
-  console.log('Event types:', events.map(e => e.type).join(', '));
+async function storeEvents(enrichedEvents: any[], env: Env): Promise<void> {
+  console.log('🔄 storeEvents called with', enrichedEvents.length, 'events');
+  console.log('Event types:', enrichedEvents.map(e => e.type).join(', '));
   
   try {
-    // Get BigQuery credentials
-    console.log('📋 Parsing credentials...');
-    const credentials = JSON.parse(env.BIGQUERY_CREDENTIALS);
-    const projectId = env.BIGQUERY_PROJECT_ID;
-    const dataset = env.BIGQUERY_DATASET;
-    console.log('✅ Credentials parsed. Project:', projectId, 'Dataset:', dataset);
-
-    // Create JWT token for BigQuery API authentication
-    console.log('🔑 Creating BigQuery token...');
-    const token = await createBigQueryToken(credentials);
-    console.log('✅ Token created');
-
-    // Insert rows into BigQuery
-    const tableId = 'events';
-    const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${dataset}/tables/${tableId}/insertAll`;
-    console.log('📊 BigQuery URL:', url);
-
-    const rows = events.map((event, index) => {
-      // Convert JSON fields to strings for BigQuery
-      const eventForBQ = {
+    const supabase = new SupabaseClient(env);
+    
+    // STEP 1: Determine unique leads needed (batch by originalSessionId)
+    // All events in the same batch share the same session and likely the same lead
+    const firstEvent = enrichedEvents[0];
+    const trackingId = firstEvent.data?.tracking_id || firstEvent._originalVisitorId || null;
+    
+    // Try to extract email from any event in the batch
+    let email: string | null = null;
+    for (const event of enrichedEvents) {
+      // Check for plain text email
+      if (event.data?.email && typeof event.data.email === 'string' && event.data.email.includes('@')) {
+        email = event.data.email;
+        break;
+      }
+      // Check for email in browser_emails_scanned event
+      if (event.type === 'browser_emails_scanned' && event.data?.emails && Array.isArray(event.data.emails)) {
+        const firstEmail = event.data.emails[0];
+        if (firstEmail?.email && firstEmail.email.includes('@')) {
+          email = firstEmail.email;
+          break;
+        }
+      }
+      // Check for captured email in email_captured event
+      if (event.type === 'email_captured' && event.data?.emailDomain) {
+        // We have email domain but not full email - skip
+        continue;
+      }
+    }
+    
+    // STEP 2: Get or create ONE lead for the entire batch
+    let leadId: string;
+    try {
+      leadId = await supabase.getOrCreateLead(trackingId, email);
+      console.log(`✅ Lead resolved: ${leadId} (tracking_id: ${trackingId})`);
+    } catch (error: any) {
+      console.error('❌ Failed to get/create lead:', error);
+      // Create anonymous lead as fallback
+      leadId = await supabase.getOrCreateLead(null);
+    }
+    
+    // STEP 3: Get or create ONE session for the entire batch
+    let sessionId: string;
+    try {
+      sessionId = await supabase.getOrCreateSession(firstEvent._originalSessionId, leadId);
+      console.log(`✅ Session created: ${sessionId}`);
+    } catch (error: any) {
+      console.error('❌ Failed to get/create session:', error);
+      // Create new session as fallback
+      sessionId = await supabase.getOrCreateSession(`fallback-${Date.now()}`, leadId);
+    }
+    
+    // STEP 4: Prepare all events with the SAME lead_id and session_id
+    const eventsToInsert = enrichedEvents.map(event => {
+      const eventForInsert = {
         ...event,
-        data: event.data ? JSON.stringify(event.data) : null,
-        urlParams: event.urlParams ? JSON.stringify(event.urlParams) : null
+        session_id: sessionId,
+        lead_id: leadId,
+        // Remove helper fields
+        _originalSessionId: undefined,
+        _originalVisitorId: undefined,
+        _originalTimestamp: undefined
       };
+      delete eventForInsert._originalSessionId;
+      delete eventForInsert._originalVisitorId;
+      delete eventForInsert._originalTimestamp;
       
-      return {
-        insertId: `${event.sessionId}-${event.timestamp}-${index}`,
-        json: eventForBQ
-      };
-    });
-    console.log('📦 Prepared', rows.length, 'rows for insertion');
-
-    console.log('🚀 Sending to BigQuery...');
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        rows,
-        skipInvalidRows: false,
-        ignoreUnknownValues: false
-      })
+      return eventForInsert;
     });
     
-    console.log('📬 BigQuery response status:', response.status, response.statusText);
-
-    if (!response.ok) {
-      const error = await response.text();
-      console.error('❌ BigQuery insertion failed:', {
-        status: response.status,
-        statusText: response.statusText,
-        error,
-        projectId,
-        dataset,
-        tableId
-      });
-      throw new Error(`BigQuery error: ${response.status} - ${error}`);
-    }
-
-    const result = await response.json() as any;
+    // STEP 5: Batch insert ALL events at once
+    console.log('🚀 Inserting', eventsToInsert.length, 'events into Supabase...');
+    await supabase.insertEvents(eventsToInsert);
+    console.log(`✅ Successfully stored ${eventsToInsert.length} events in Supabase`);
     
-    if (result.insertErrors) {
-      console.error('❌ BigQuery insert errors:', JSON.stringify(result.insertErrors, null, 2));
-    } else {
-      console.log(`✅ Successfully stored ${events.length} events in BigQuery`);
-    }
   } catch (error: any) {
     console.error('❌ Failed to store events:', {
       message: error.message,
@@ -1403,98 +1431,14 @@ async function storeEvents(events: any[], env: Env): Promise<void> {
       name: error.name
     });
     // In production, you might want to queue failed events for retry
+    throw error;
   }
 }
 
-/**
- * Create JWT token for BigQuery API
- * @param credentials - Service account credentials JSON
- * @param scope - OAuth scope (default: full BigQuery access for read + write)
- */
-async function createBigQueryToken(credentials: any, scope?: string): Promise<string> {
-  const header = {
-    alg: 'RS256',
-    typ: 'JWT',
-    kid: credentials.private_key_id
-  };
-
-  const now = Math.floor(Date.now() / 1000);
-  const payload = {
-    iss: credentials.client_email,
-    // Use full BigQuery scope to allow both read (queries) and write (inserts)
-    scope: scope || 'https://www.googleapis.com/auth/bigquery',
-    aud: 'https://oauth2.googleapis.com/token',
-    exp: now + 3600,
-    iat: now
-  };
-
-  // Base64url encode header and payload
-  const encodedHeader = base64urlEncode(JSON.stringify(header));
-  const encodedPayload = base64urlEncode(JSON.stringify(payload));
-  const unsignedToken = `${encodedHeader}.${encodedPayload}`;
-
-  // Sign with private key
-  const privateKey = await importPrivateKey(credentials.private_key);
-  const signature = await signToken(unsignedToken, privateKey);
-  const encodedSignature = base64urlEncode(signature);
-
-  const jwt = `${unsignedToken}.${encodedSignature}`;
-
-  // Exchange JWT for access token
-  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded'
-    },
-    body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`
-  });
-
-  const tokenData = await tokenResponse.json() as any;
-  return tokenData.access_token;
-}
-
-async function importPrivateKey(pem: string): Promise<CryptoKey> {
-  // Remove PEM header/footer and decode
-  const pemContents = pem
-    .replace('-----BEGIN PRIVATE KEY-----', '')
-    .replace('-----END PRIVATE KEY-----', '')
-    .replace(/\s/g, '');
-  
-  const binaryDer = Uint8Array.from(atob(pemContents), c => c.charCodeAt(0));
-
-  return await crypto.subtle.importKey(
-    'pkcs8',
-    binaryDer,
-    {
-      name: 'RSASSA-PKCS1-v1_5',
-      hash: 'SHA-256'
-    },
-    false,
-    ['sign']
-  );
-}
-
-async function signToken(data: string, key: CryptoKey): Promise<string> {
-  const encoder = new TextEncoder();
-  const signature = await crypto.subtle.sign(
-    'RSASSA-PKCS1-v1_5',
-    key,
-    encoder.encode(data)
-  );
-  return String.fromCharCode(...new Uint8Array(signature));
-}
-
-function base64urlEncode(data: string): string {
-  const base64 = btoa(data);
-  return base64
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=/g, '');
-}
 
 /**
  * Handle identity lookup (resolve short ID to full profile)
- * Uses lazy loading: KV first, then BigQuery, then cache to KV
+ * Uses lazy loading: KV first, then Supabase, then cache to KV
  */
 async function handleIdentityLookup(request: Request, env: Env): Promise<Response> {
   try {
@@ -1509,9 +1453,9 @@ async function handleIdentityLookup(request: Request, env: Env): Promise<Respons
     let identity = await env.IDENTITY_STORE.get(identityId, 'json');
 
     if (!identity) {
-      // Not in KV, look up in BigQuery
-      console.log('Identity not in KV, checking BigQuery...', identityId);
-      identity = await lookupIdentityInBigQuery(identityId, env);
+      // Not in KV, look up in Supabase
+      console.log('Identity not in KV, checking Supabase...', identityId);
+      identity = await lookupIdentityInSupabase(identityId, env);
       
       if (identity) {
         // Cache in KV for future requests (90 days)
@@ -1537,108 +1481,55 @@ async function handleIdentityLookup(request: Request, env: Env): Promise<Respons
 }
 
 /**
- * Lookup identity in BigQuery - Query leads table directly
+ * Lookup identity in Supabase - Query lead table directly
  */
-async function lookupIdentityInBigQuery(shortId: string, env: Env): Promise<any> {
-  console.log('📊 Looking up identity in BigQuery:', shortId);
+async function lookupIdentityInSupabase(shortId: string, env: Env): Promise<any> {
+  console.log('📊 Looking up identity in Supabase:', shortId);
   try {
-    console.log('🔑 Creating BigQuery token...');
-    const token = await createBigQueryToken(JSON.parse(env.BIGQUERY_CREDENTIALS));
-    console.log('✅ Token created');
-    const projectId = env.BIGQUERY_PROJECT_ID;
-    const dataset = env.BIGQUERY_DATASET;
-    console.log('📋 Project:', projectId, 'Dataset:', dataset);
+    const supabase = new SupabaseClient(env);
     
-    const query = `
-      SELECT 
-        trackingId,
-        email,
-        firstName,
-        lastName,
-        person_name,
-        phone,
-        linkedin,
-        company_name,
-        company_description,
-        company_size,
-        revenue,
-        industry,
-        department,
-        company_website,
-        company_linkedin,
-        job_title,
-        seniority
-      FROM \`${projectId}.${dataset}.leads\`
-      WHERE trackingId = @shortId
-      LIMIT 1
-    `;
+    const leads = await supabase.request(
+      'GET',
+      `/lead?tracking_id=eq.${shortId}&select=*&limit=1`
+    );
     
-    const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/queries`;
-    
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        query,
-        useLegacySql: false,
-        parameterMode: 'NAMED',
-        queryParameters: [
-          {
-            name: 'shortId',
-            parameterType: { type: 'STRING' },
-            parameterValue: { value: shortId }
-          }
-        ]
-      })
-    });
-    
-    if (!response.ok) {
-      console.error('BigQuery lookup failed:', await response.text());
-      return null;
-    }
-    
-    const result = await response.json() as any;
-    
-    if (result.rows && result.rows.length > 0) {
-      const row = result.rows[0].f;
+    if (leads && leads.length > 0) {
+      const lead = leads[0];
       return {
         // Identity data
-        trackingId: row[0].v,
-        email: row[1].v,
-        firstName: row[2].v,
-        lastName: row[3].v,
-        personName: row[4].v,
+        trackingId: lead.tracking_id,
+        email: lead.work_email || lead.personal_email,
+        firstName: lead.first_name,
+        lastName: lead.last_name,
+        personName: lead.first_name && lead.last_name ? `${lead.first_name} ${lead.last_name}` : null,
         
         // Contact
-        phone: row[5].v,
-        linkedin: row[6].v,
+        phone: lead.phone,
+        linkedin: lead.linkedin_url,
         
         // Company
-        company: row[7].v,
-        companyName: row[7].v,
-        companyDescription: row[8].v,
-        companySize: row[9].v,
-        revenue: row[10].v,
-        industry: row[11].v,
-        department: row[12].v,
-        companyWebsite: row[13].v,
-        companyLinkedin: row[14].v,
+        company: lead.company_name,
+        companyName: lead.company_name,
+        companyDescription: lead.company_description,
+        companySize: lead.company_headcount,
+        revenue: lead.company_revenue,
+        industry: lead.company_industry,
+        department: lead.job_department,
+        companyWebsite: lead.company_website,
+        companyLinkedin: lead.company_linkedin,
         
         // Job
-        jobTitle: row[15].v,
-        seniority: row[16].v,
+        jobTitle: lead.job_title,
+        seniority: lead.job_seniority,
         
         // Computed domain
-        domain: row[13].v || (row[1].v ? row[1].v.split('@')[1] : null)
+        domain: lead.company_website || (lead.work_email || lead.personal_email ? (lead.work_email || lead.personal_email).split('@')[1] : null)
       };
     }
     
     return null;
   } catch (error) {
-    console.error('BigQuery lookup error:', error);
+    console.error('Supabase lookup error:', error);
     return null;
   }
 }
@@ -1667,7 +1558,7 @@ async function handlePersonalization(request: Request, env: Env): Promise<Respon
 
     if (!personalization) {
       // Not in either KV, check if this is a known lead from leads table
-      const identity = await lookupIdentityInBigQuery(visitorId, env);
+      const identity = await lookupIdentityInSupabase(visitorId, env);
       
       if (identity) {
         // First visit - use ALL data from leads table
@@ -1751,19 +1642,25 @@ async function handleRedirect(request: Request, env: Env): Promise<Response> {
       return Response.redirect(destination, 302);
     }
 
-    // Track the click
-    const clickEvent = {
+    // Track the click event (as a proper TrackingEvent)
+    const clickEvent: TrackingEvent = {
       type: 'email_click',
       timestamp: Date.now(),
-      identityId,
+      sessionId: `email-click-${Date.now()}`, // Generate session ID for email clicks
+      visitorId: identityId, // Use identity ID as visitor ID
+      url: destination,
+      referrer: request.headers.get('Referer') || '',
+      data: {
       destination,
-      ip: request.headers.get('CF-Connecting-IP'),
-      userAgent: request.headers.get('User-Agent'),
-      country: request.headers.get('CF-IPCountry')
+        tracking_id: identityId
+      }
     };
 
-    // Store click asynchronously
-    await storeEvents([clickEvent], env);
+    // Enrich and store click asynchronously (don't wait)
+    const enrichedClick = enrichEvent(clickEvent, request);
+    storeEvents([enrichedClick], env).catch(err => {
+      console.error('Failed to store email click:', err);
+    });
 
     // Redirect with identity parameter
     const destinationUrl = new URL(destination, url.origin);

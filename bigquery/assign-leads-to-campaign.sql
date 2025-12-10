@@ -11,24 +11,14 @@
 INSERT INTO `outbound_sales.campaigns` (
   campaignId,
   campaignName,
-  description,
-  totalSequenceSteps,
-  utmSource,
-  utmMedium,
-  utmCampaign,
-  status,
-  startedAt
+  smartleadCampaignId,
+  status
 )
 VALUES (
   'q1-outreach-2025',              -- campaignId (unique, lowercase, hyphenated)
   'Q1 Outreach Campaign 2025',     -- campaignName (human-readable)
-  'Targeting VPs in SaaS companies', -- description
-  5,                               -- totalSequenceSteps (number of emails)
-  'email',                         -- utmSource
-  'email',                         -- utmMedium
-  'q1-outreach-2025',             -- utmCampaign (for attribution)
-  'active',                        -- status
-  CURRENT_TIMESTAMP()              -- startedAt
+  'smartlead_12345',               -- smartleadCampaignId (from Smartlead)
+  'active'                         -- status
 );
 
 -- ============================================
@@ -46,18 +36,12 @@ VALUES (
 INSERT INTO `outbound_sales.campaign_members` (
   trackingId,
   campaignId,
-  campaignName,
-  sequenceStep,
-  status,
-  addedAt
+  status
 )
 SELECT 
   l.trackingId,
   'q1-outreach-2025' as campaignId,
-  'Q1 Outreach Campaign 2025' as campaignName,
-  1 as sequenceStep,                -- Start at step 1
-  'active' as status,
-  CURRENT_TIMESTAMP() as addedAt
+  'active' as status
 FROM `outbound_sales.leads` l
 WHERE l.trackingId IS NOT NULL
   -- ============================================

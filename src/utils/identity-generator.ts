@@ -139,18 +139,18 @@ export async function storeIdentitiesInKV(
 }
 
 /**
- * Store identities in BigQuery
+ * Store identities in Supabase
  */
-export async function storeIdentitiesInBigQuery(
+export async function storeIdentitiesInSupabase(
   identities: LeadIdentity[],
   projectId: string,
   dataset: string,
   credentials: any
 ): Promise<void> {
-  // This would use BigQuery API similar to the worker
-  // Simplified version - in production use @google-cloud/bigquery
-  console.log(`Would store ${identities.length} identities in BigQuery`);
-  // Implementation omitted for brevity - use BigQuery streaming insert
+  // This would use Supabase API similar to the worker
+  // Simplified version - in production use Supabase client
+  console.log(`Would store ${identities.length} identities in Supabase`);
+  // Implementation omitted for brevity - use Supabase REST API
 }
 
 /**

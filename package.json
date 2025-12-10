@@ -6,8 +6,10 @@
   "scripts": {
     "dev:pixel": "vite",
     "build:pixel": "vite build",
+    "update-pixel-bundle": "node scripts/update-pixel-bundle.js",
     "dev:worker": "wrangler dev src/worker/index.ts",
     "deploy:worker": "wrangler deploy",
+    "deploy": "npm run update-pixel-bundle && wrangler deploy",
     "deploy:pixel": "wrangler pages deploy dist",
     "create-campaign": "tsx scripts/create-campaign.ts",
     "assign-tracking-ids": "tsx scripts/assign-tracking-ids.ts",
