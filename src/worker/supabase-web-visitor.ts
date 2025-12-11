@@ -228,12 +228,12 @@ export class SupabaseClient {
    */
   async getOrCreateSession(
     sessionIdString: string,
-    webVisitId?: string | null,
+    webVisitorId?: string | null,
     leadId?: string | null
   ): Promise<string> {
     try {
       // Validate: must have exactly one of webVisitorId or leadId
-      if ((webVisitId && leadId) || (!webVisitId && !leadId)) {
+      if ((webVisitorId && leadId) || (!webVisitorId && !leadId)) {
         throw new Error('Session must have exactly one of webVisitorId or leadId');
       }
 
@@ -243,14 +243,14 @@ export class SupabaseClient {
       
       const sessionData: any = {
         start_time: new Date().toISOString(),
-        web_visitor_id: webVisitId || null,
+        web_visitor_id: webVisitorId || null,
         lead_id: leadId || null
       };
 
       const newSession = await this.request('POST', '/session', sessionData);
 
       if (newSession && newSession.length > 0) {
-        console.log(`✅ Created session: ${newSession[0].id} (web_visitor: ${webVisitId}, lead: ${leadId})`);
+        console.log(`✅ Created session: ${newSession[0].id} (web_visitor: ${webVisitorId}, lead: ${leadId})`);
         return newSession[0].id;
       }
 
@@ -293,26 +293,26 @@ export class SupabaseClient {
       // Get event counts
       const pageviews = await this.request(
         'GET',
-        `/event?web_visitor_id=eq.${webVisitId}&type=eq.page_view&select=id`,
+        `/event?web_visitor_id=eq.${webVisitorId}&type=eq.page_view&select=id`,
         undefined
       );
       
       const clicks = await this.request(
         'GET',
-        `/event?web_visitor_id=eq.${webVisitId}&type=eq.click&select=id`,
+        `/event?web_visitor_id=eq.${webVisitorId}&type=eq.click&select=id`,
         undefined
       );
 
       const sessions = await this.request(
         'GET',
-        `/session?web_visitor_id=eq.${webVisitId}&select=id`,
+        `/session?web_visitor_id=eq.${webVisitorId}&select=id`,
         undefined
       );
 
       // Update web_visitor record
       await this.request(
         'PATCH',
-        `/web_visitor?id=eq.${webVisitId}`,
+        `/web_visitor?id=eq.${webVisitorId}`,
         {
           total_pageviews: pageviews?.length || 0,
           total_clicks: clicks?.length || 0,

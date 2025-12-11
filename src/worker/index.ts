@@ -1,10 +1,11 @@
 /**
  * Outbound Intent Engine - Cloudflare Worker
  * Edge worker for event ingestion, validation, and forwarding to Supabase
+ * Using web_visitor architecture: anonymous visitors → web_visitor, identified → lead
  */
 
 import { PIXEL_CODE_BASE64 } from './pixel-bundle';
-import { SupabaseClient } from './supabase';
+import { SupabaseClient } from './supabase-web-visitor';
 
 export interface Env {
   IDENTITY_STORE: KVNamespace;
@@ -107,7 +108,7 @@ export default {
         }];
 
         const enrichedEvents = testEvents.map(event => enrichEvent(event, request));
-        await storeEvents(enrichedEvents, env);
+        await storeEvents(enrichedEvents, env, ctx);
 
         return new Response(JSON.stringify({ 
           success: true, 
@@ -1056,7 +1057,7 @@ async function handleTrackEvents(request: Request, env: Env, ctx: ExecutionConte
     let storeError: string | null = null;
     
     try {
-      await storeEvents(enrichedEvents, env);
+      await storeEvents(enrichedEvents, env, ctx);
       storeSuccess = true;
       console.log('✅ Events stored successfully in Supabase');
     } catch (error: any) {
@@ -1341,27 +1342,35 @@ async function syncSupabaseToKV(env: Env): Promise<void> {
 }
 
 /**
- * Store events in Supabase
- * OPTIMIZED: Batch creates leads/sessions ONCE per batch instead of per-event
+ * Store events using web_visitor architecture
+ * Key decision: Is this visitor anonymous or identified?
  */
-async function storeEvents(enrichedEvents: any[], env: Env): Promise<void> {
+async function storeEvents(enrichedEvents: any[], env: Env, ctx?: ExecutionContext): Promise<void> {
   console.log('🔄 storeEvents called with', enrichedEvents.length, 'events');
   console.log('Event types:', enrichedEvents.map(e => e.type).join(', '));
   
   try {
     const supabase = new SupabaseClient(env);
     
-    // STEP 1: Determine unique leads needed (batch by originalSessionId)
-    // All events in the same batch share the same session and likely the same lead
+    // Extract visitor information from events
     const firstEvent = enrichedEvents[0];
-    const trackingId = firstEvent.data?.tracking_id || firstEvent._originalVisitorId || null;
+    const visitorId = firstEvent._originalVisitorId || `visitor-${Date.now()}`;
+    const trackingId = firstEvent.data?.tracking_id || null;
+    const deviceFingerprint = firstEvent.data?.deviceFingerprint || null;
+    const browserId = firstEvent.data?.browserId || null;
     
-    // Try to extract email from any event in the batch
+    // Try to extract email and hashes from any event in the batch
     let email: string | null = null;
+    let emailHashes: { sha256?: string; sha1?: string; md5?: string } = {};
     for (const event of enrichedEvents) {
       // Check for plain text email
       if (event.data?.email && typeof event.data.email === 'string' && event.data.email.includes('@')) {
         email = event.data.email;
+        emailHashes = {
+          sha256: event.data.emailHash || event.data.sha256 || null,
+          sha1: event.data.sha1 || null,
+          md5: event.data.md5 || null
+        };
         break;
       }
       // Check for email in browser_emails_scanned event
@@ -1369,44 +1378,109 @@ async function storeEvents(enrichedEvents: any[], env: Env): Promise<void> {
         const firstEmail = event.data.emails[0];
         if (firstEmail?.email && firstEmail.email.includes('@')) {
           email = firstEmail.email;
+          emailHashes = {
+            sha256: firstEmail.sha256 || firstEmail.hash || null,
+            sha1: firstEmail.sha1 || null,
+            md5: firstEmail.md5 || null
+          };
           break;
         }
       }
-      // Check for captured email in email_captured event
-      if (event.type === 'email_captured' && event.data?.emailDomain) {
-        // We have email domain but not full email - skip
-        continue;
+    }
+
+    // DECISION POINT: Is this visitor identified?
+    let isIdentified = false;
+    let webVisitorId: string | null = null;
+    let leadId: string | null = null;
+
+    // Check if we have a tracking_id (from email campaign)
+    if (trackingId) {
+      // Try to find existing lead with this tracking_id
+      try {
+        leadId = await supabase.getOrCreateLead(trackingId, email);
+        isIdentified = true;
+        console.log(`✅ Visitor identified via tracking_id: ${trackingId} → lead ${leadId}`);
+      } catch (error) {
+        console.warn('⚠️ Could not find/create lead by tracking_id, treating as anonymous');
       }
     }
-    
-    // STEP 2: Get or create ONE lead for the entire batch
-    let leadId: string;
-    try {
-      leadId = await supabase.getOrCreateLead(trackingId, email);
-      console.log(`✅ Lead resolved: ${leadId} (tracking_id: ${trackingId})`);
-    } catch (error: any) {
-      console.error('❌ Failed to get/create lead:', error);
-      // Create anonymous lead as fallback
-      leadId = await supabase.getOrCreateLead(null);
+
+    // Check if we have an email and should identify them
+    if (!isIdentified && email) {
+      // Check if this visitor was previously identified
+      const identificationStatus = await supabase.checkVisitorIdentification(visitorId);
+      
+      if (identificationStatus.isIdentified && identificationStatus.leadId) {
+        // Already identified!
+        leadId = identificationStatus.leadId;
+        isIdentified = true;
+        console.log(`✅ Visitor already identified: ${visitorId} → lead ${leadId}`);
+      } else {
+        // New identification event!
+        try {
+          // First create web_visitor if it doesn't exist
+          webVisitorId = await supabase.getOrCreateWebVisitor(visitorId, deviceFingerprint, browserId);
+          
+          // Now identify them
+          leadId = await supabase.identifyVisitor(
+            visitorId,
+            email,
+            firstEvent.data?.firstName || null,
+            firstEvent.data?.lastName || null,
+            'email_capture'
+          );
+          isIdentified = true;
+          console.log(`✅ Visitor newly identified: ${visitorId} → lead ${leadId}`);
+        } catch (error: any) {
+          console.error('❌ Failed to identify visitor:', error);
+          // Fall back to anonymous tracking
+        }
+      }
     }
-    
-    // STEP 3: Get or create ONE session for the entire batch
+
+    // If still not identified, track as anonymous visitor
+    if (!isIdentified) {
+      webVisitorId = await supabase.getOrCreateWebVisitor(visitorId, deviceFingerprint, browserId);
+      console.log(`📊 Tracking as anonymous visitor: ${visitorId} → web_visitor ${webVisitorId}`);
+      
+      // If we have email hashes, store them for later de-anonymization
+      if (email && (emailHashes.sha256 || emailHashes.sha1 || emailHashes.md5)) {
+        const emailDomain = email.split('@')[1];
+        await supabase.updateWebVisitorEmailHashes(
+          webVisitorId, 
+          emailHashes.sha256 || '', 
+          emailHashes.sha1 || null, 
+          emailHashes.md5 || null, 
+          emailDomain
+        );
+      }
+    }
+
+    // Create session (belongs to either web_visitor or lead)
     let sessionId: string;
     try {
-      sessionId = await supabase.getOrCreateSession(firstEvent._originalSessionId, leadId);
+      sessionId = await supabase.getOrCreateSession(
+        firstEvent._originalSessionId,
+        isIdentified ? null : webVisitorId,
+        isIdentified ? leadId : null
+      );
       console.log(`✅ Session created: ${sessionId}`);
     } catch (error: any) {
-      console.error('❌ Failed to get/create session:', error);
-      // Create new session as fallback
-      sessionId = await supabase.getOrCreateSession(`fallback-${Date.now()}`, leadId);
+      console.error('❌ Failed to create session:', error);
+      sessionId = await supabase.getOrCreateSession(
+        `fallback-${Date.now()}`,
+        isIdentified ? null : webVisitorId,
+        isIdentified ? leadId : null
+      );
     }
-    
-    // STEP 4: Prepare all events with the SAME lead_id and session_id
+
+    // Prepare all events with proper ownership
     const eventsToInsert = enrichedEvents.map(event => {
-      const eventForInsert = {
+      const eventForInsert: any = {
         ...event,
         session_id: sessionId,
-        lead_id: leadId,
+        web_visitor_id: isIdentified ? null : webVisitorId,
+        lead_id: isIdentified ? leadId : null,
         // Remove helper fields
         _originalSessionId: undefined,
         _originalVisitorId: undefined,
@@ -1418,11 +1492,21 @@ async function storeEvents(enrichedEvents: any[], env: Env): Promise<void> {
       
       return eventForInsert;
     });
-    
-    // STEP 5: Batch insert ALL events at once
+
+    // Batch insert ALL events at once
     console.log('🚀 Inserting', eventsToInsert.length, 'events into Supabase...');
     await supabase.insertEvents(eventsToInsert);
-    console.log(`✅ Successfully stored ${eventsToInsert.length} events in Supabase`);
+    console.log(`✅ Successfully stored ${eventsToInsert.length} events`);
+
+    // Update aggregates for anonymous visitors (after all events inserted)
+    if (!isIdentified && webVisitorId && ctx) {
+      // Don't await - update in background
+      ctx.waitUntil(
+        supabase.updateWebVisitorAggregates(webVisitorId).catch(err => {
+          console.warn('⚠️ Failed to update aggregates:', err);
+        })
+      );
+    }
     
   } catch (error: any) {
     console.error('❌ Failed to store events:', {
@@ -1430,7 +1514,6 @@ async function storeEvents(enrichedEvents: any[], env: Env): Promise<void> {
       stack: error.stack,
       name: error.name
     });
-    // In production, you might want to queue failed events for retry
     throw error;
   }
 }
@@ -1535,6 +1618,74 @@ async function lookupIdentityInSupabase(shortId: string, env: Env): Promise<any>
 }
 
 /**
+ * Lookup web_visitor in Supabase by visitor_id
+ */
+async function lookupWebVisitorInSupabase(visitorId: string, env: Env): Promise<any> {
+  console.log('📊 Looking up web_visitor in Supabase:', visitorId);
+  try {
+    const supabase = new SupabaseClient(env);
+    
+    const visitors = await supabase.request(
+      'GET',
+      `/web_visitor?visitor_id=eq.${encodeURIComponent(visitorId)}&select=*&limit=1`
+    );
+    
+    if (visitors && visitors.length > 0) {
+      return visitors[0];
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Web visitor lookup error:', error);
+    return null;
+  }
+}
+
+/**
+ * Lookup lead by UUID in Supabase
+ */
+async function lookupLeadById(leadId: string, env: Env): Promise<any> {
+  console.log('📊 Looking up lead by ID in Supabase:', leadId);
+  try {
+    const supabase = new SupabaseClient(env);
+    
+    const leads = await supabase.request(
+      'GET',
+      `/lead?id=eq.${leadId}&select=*&limit=1`
+    );
+    
+    if (leads && leads.length > 0) {
+      const lead = leads[0];
+      return {
+        firstName: lead.first_name,
+        lastName: lead.last_name,
+        personName: lead.first_name && lead.last_name ? `${lead.first_name} ${lead.last_name}` : null,
+        email: lead.work_email || lead.personal_email,
+        phone: lead.phone,
+        linkedin: lead.linkedin_url,
+        company: lead.company_name,
+        companyName: lead.company_name,
+        companyDescription: lead.company_description,
+        companySize: lead.company_headcount,
+        revenue: lead.company_revenue,
+        industry: lead.company_industry,
+        department: lead.job_department,
+        companyWebsite: lead.company_website,
+        companyLinkedin: lead.company_linkedin,
+        jobTitle: lead.job_title,
+        seniority: lead.job_seniority,
+        domain: lead.company_website || (lead.work_email || lead.personal_email ? (lead.work_email || lead.personal_email).split('@')[1] : null)
+      };
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Lead by ID lookup error:', error);
+    return null;
+  }
+}
+
+/**
  * Handle personalization data fetch
  * First visit: Uses leads table (name, company, enrichment data)
  * Return visits: Uses lead_profiles (intent scores, behavior)
@@ -1557,11 +1708,11 @@ async function handlePersonalization(request: Request, env: Env): Promise<Respon
     }
 
     if (!personalization) {
-      // Not in either KV, check if this is a known lead from leads table
+      // Try to find in Supabase - check both lead and web_visitor
       const identity = await lookupIdentityInSupabase(visitorId, env);
       
       if (identity) {
-        // First visit - use ALL data from leads table
+        // Found as identified lead
         personalization = {
           personalized: true,
           
@@ -1603,13 +1754,39 @@ async function handlePersonalization(request: Request, env: Env): Promise<Respon
           totalPageviews: 0
         };
       } else {
-        // Unknown visitor
-        return new Response(JSON.stringify({ personalized: false }), {
-          headers: { 
-            'Content-Type': 'application/json',
-            ...getCORSHeaders(request, env)
+        // Try to find as web_visitor (anonymous or identified)
+        const webVisitorData = await lookupWebVisitorInSupabase(visitorId, env);
+        
+        if (webVisitorData && webVisitorData.is_identified && webVisitorData.lead_id) {
+          // They're identified but we need lead data
+          const leadData = await lookupLeadById(webVisitorData.lead_id, env);
+          if (leadData) {
+            personalization = {
+              personalized: true,
+              ...leadData,
+              intentScore: webVisitorData.intent_score || 0,
+              engagementLevel: webVisitorData.engagement_level || 'new',
+              totalVisits: webVisitorData.total_sessions || 0,
+              totalPageviews: webVisitorData.total_pageviews || 0
+            };
           }
-        });
+        } else if (webVisitorData && !webVisitorData.is_identified) {
+          // Anonymous visitor - no personalization for privacy
+          return new Response(JSON.stringify({ personalized: false }), {
+            headers: { 
+              'Content-Type': 'application/json',
+              ...getCORSHeaders(request, env)
+            }
+          });
+        } else {
+          // Not found anywhere
+          return new Response(JSON.stringify({ personalized: false }), {
+            headers: { 
+              'Content-Type': 'application/json',
+              ...getCORSHeaders(request, env)
+            }
+          });
+        }
       }
     }
 
@@ -1658,7 +1835,7 @@ async function handleRedirect(request: Request, env: Env): Promise<Response> {
 
     // Enrich and store click asynchronously (don't wait)
     const enrichedClick = enrichEvent(clickEvent, request);
-    storeEvents([enrichedClick], env).catch(err => {
+    storeEvents([enrichedClick], env, ctx).catch(err => {
       console.error('Failed to store email click:', err);
     });
 

@@ -60,7 +60,7 @@ export default {
     }
 
     if (url.pathname === '/go' && request.method === 'GET') {
-      return handleRedirect(request, env);
+      return handleRedirect(request, env, ctx);
     }
 
     if (url.pathname === '/health') {
@@ -179,8 +179,8 @@ async function handleTrackEvents(request: Request, env: Env, ctx: ExecutionConte
  * Store events using web_visitor architecture
  * Key decision: Is this visitor anonymous or identified?
  */
-async function storeEventsWebVisits(enrichedEvents: any[], env: Env): Promise<void> {
-  console.log('🔄 storeEventsWebVisits called with', enrichedEvents.length, 'events');
+async function storeEventsWebVisitor(enrichedEvents: any[], env: Env, ctx: ExecutionContext): Promise<void> {
+  console.log('🔄 storeEventsWebVisitor called with', enrichedEvents.length, 'events');
   
   try {
     const supabase = new SupabaseClient(env);
@@ -312,7 +312,7 @@ async function storeEventsWebVisits(enrichedEvents: any[], env: Env): Promise<vo
       const eventForInsert: any = {
         ...event,
         session_id: sessionId,
-        web_visitor_id: isIdentified ? null : webVisitId,
+        web_visitor_id: isIdentified ? null : webVisitorId,
         lead_id: isIdentified ? leadId : null,
         // Remove helper fields
         _originalSessionId: undefined,
@@ -694,7 +694,7 @@ async function handlePersonalization(request: Request, env: Env): Promise<Respon
   }
 }
 
-async function handleRedirect(request: Request, env: Env): Promise<Response> {
+async function handleRedirect(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   try {
     const url = new URL(request.url);
     const identityId = url.searchParams.get('i');
@@ -718,9 +718,12 @@ async function handleRedirect(request: Request, env: Env): Promise<Response> {
     };
 
     const enrichedClick = enrichEvent(clickEvent, request);
-    storeEventsWebVisitor([enrichedClick], env).catch(err => {
-      console.error('Failed to store email click:', err);
-    });
+    // Store email click event in background
+    ctx.waitUntil(
+      storeEventsWebVisitor([enrichedClick], env, ctx).catch(err => {
+        console.error('Failed to store email click:', err);
+      })
+    );
 
     const destinationUrl = new URL(destination, url.origin);
     destinationUrl.searchParams.set('i', identityId);

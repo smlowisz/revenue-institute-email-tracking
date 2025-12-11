@@ -1,5 +1,5 @@
 name = "outbound-intent-engine"
-main = "src/worker/index-web-visitor.ts"
+main = "src/worker/index.ts"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
 account_id = "e406ada6b728029380a6465d03932cb8"
