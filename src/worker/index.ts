@@ -1183,6 +1183,9 @@ function enrichEvent(event: TrackingEvent, request: Request): any {
     user_agent: userAgent || null,
     default_language: acceptLanguage || null,
     
+    // Device type from Cloudflare
+    device_type: request.cf?.deviceType || null,
+    
     // URL parameters (stored as TEXT - JSON string)
     url_parms: urlParams && Object.keys(urlParams).length > 0 ? JSON.stringify(urlParams) : null,
     utm_source: urlParams.utm_source || null,
